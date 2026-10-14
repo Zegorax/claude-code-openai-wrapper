@@ -600,11 +600,70 @@ See `examples/session_continuity.py` for comprehensive Python examples and `exam
 - `DELETE /v1/sessions/{session_id}` - Delete a specific session
 - `GET /v1/sessions/stats` - Get session manager statistics
 
+## Using with QwenPaw / OpenAI function calling
+
+`/v1/chat/completions` accepts OpenAI function calling: `tools`, `tool_choice`
+(`"auto"`, `"none"`, `"required"` or `{"type": "function", "function": {"name": ...}}`),
+`parallel_tool_calls`, assistant messages with `tool_calls` (and `content: null`),
+and `role: "tool"` results. The client runs the tools itself; Claude Code's built-in
+tools stay disabled and every request is a single model turn, so agent runtimes such
+as [QwenPaw](https://github.com/agentscope-ai/QwenPaw) keep their own memory, context
+management and tool approval.
+
+### How it works
+
+- The tool schemas and a short call format are appended to the system prompt. All
+  `system` and `developer` messages are joined.
+- Earlier tool calls are rendered as `<tool_call>{...}</tool_call>` and tool results
+  as `<tool_result id=... name=...>` blocks in the prompt. Tool results are passed
+  through unfiltered.
+- Claude's `<tool_call>` blocks are parsed back into native `message.tool_calls`
+  with `finish_reason: "tool_calls"`. JSON, fenced JSON, a `parameters` alias and the
+  `<function=NAME><parameter=KEY>` form are accepted; calls to tools that were not
+  offered are dropped.
+- With `stream: true`, text streams token by token. Streaming stops at the first
+  `<tool_call>` tag; the calls follow as `delta.tool_calls` chunks once the reply is
+  complete. No tag fragments reach the client.
+- If a reply contains `<tool_call>` markup but no usable call and no text has been
+  sent yet, the request is retried once with a short correction
+  (`TOOL_CALL_RETRY=false` to disable). Otherwise the markup is returned as text.
+- `usage` reports the real token counts from the Claude Agent SDK, including cache
+  reads and writes.
+
+Requests without tools or tool messages use the original code path unchanged. Set
+`STREAM_PARTIAL=true` to also stream those token by token (only when `enable_tools`
+is off).
+
+### QwenPaw setup
+
+1. Run the wrapper on the QwenPaw host with Claude Code authentication, for example
+   `claude setup-token`, then `export CLAUDE_CODE_OAUTH_TOKEN=...` and
+   `CLAUDE_AUTH_METHOD=cli`. The token is only read by the bundled Claude Code CLI
+   from its environment; the wrapper never sends it over HTTP.
+2. In QwenPaw Console → Settings → Models, add a custom OpenAI-compatible provider
+   with base URL `http://127.0.0.1:8000/v1` and any API key (or the wrapper's
+   `API_KEY` if protection is on).
+3. Add a model id listed by `GET /v1/models`, for example `claude-sonnet-4-6`.
+4. Mark the model as supporting tool calling (`supports_tool_calling`). QwenPaw
+   leaves models without it out of tool-using queries.
+
+### Latency and usage
+
+Each agent step starts a new Claude Code process and sends the full history, so a
+task with N tool calls costs N+1 complete runs, and input tokens grow with every
+step. The system prompt (with the tool schemas) is rendered identically on every
+call so it can be served from Claude's prompt cache; the conversation itself is one
+growing block and is mostly not cached. Each step logs `duration_ms`,
+`duration_api_ms` and token usage, including cache reads, at INFO level.
+
+Use this with your own subscription for your own use only. Don't put a shared or
+public QwenPaw instance (for example a public chat channel) on it.
+
 ## Limitations & Roadmap
 
 ### 🚫 **Current Limitations**
 - **Images in messages** are converted to text placeholders
-- **Function calling** not supported (tools work automatically based on prompts)
+- **Function calling** is emulated through the prompt (see [Using with QwenPaw / OpenAI function calling](#using-with-qwenpaw--openai-function-calling))
 - **OpenAI parameters** not yet mapped: `temperature`, `top_p`, `max_tokens`, `logit_bias`, `presence_penalty`, `frequency_penalty`
 - **Multiple responses** (`n > 1`) not supported
 
