@@ -548,7 +548,49 @@ class TestClaudeCodeCLIRunCompletion:
 
             assert len(captured_options) == 1
             opts = captured_options[0]
-            assert opts.system_prompt == {"type": "text", "text": "You are helpful"}
+            assert opts.system_prompt == {"type": "custom", "prompt": "You are helpful"}
+
+    @pytest.mark.asyncio
+    async def test_run_completion_large_system_prompt_uses_file(self, cli_instance):
+        """Large system prompts are written to a temp file that is removed afterwards."""
+        import os
+        from src.claude_cli import SYSTEM_PROMPT_FILE_THRESHOLD
+
+        big_prompt = "x" * (SYSTEM_PROMPT_FILE_THRESHOLD + 1)
+        seen = {}
+
+        async def mock_query(prompt, options):
+            seen["system_prompt"] = options.system_prompt
+            path = options.system_prompt["path"]
+            with open(path, encoding="utf-8") as f:
+                seen["content"] = f.read()
+            yield {"type": "assistant"}
+
+        with patch("src.claude_cli.query", mock_query):
+            async for _ in cli_instance.run_completion("Hello", system_prompt=big_prompt):
+                pass
+
+        assert seen["system_prompt"]["type"] == "file"
+        assert seen["content"] == big_prompt
+        assert not os.path.exists(seen["system_prompt"]["path"])
+
+    @pytest.mark.asyncio
+    async def test_run_completion_include_partial_messages(self, cli_instance):
+        """include_partial_messages is forwarded to the SDK options."""
+        captured_options = []
+
+        async def mock_query(prompt, options):
+            captured_options.append(options)
+            yield {"type": "assistant"}
+
+        with patch("src.claude_cli.query", mock_query):
+            async for _ in cli_instance.run_completion("Hello", include_partial_messages=True):
+                pass
+            async for _ in cli_instance.run_completion("Hello"):
+                pass
+
+        assert captured_options[0].include_partial_messages is True
+        assert captured_options[1].include_partial_messages is False
 
     @pytest.mark.asyncio
     async def test_run_completion_with_model(self, cli_instance):
