@@ -322,6 +322,15 @@ docker run -d -p 8000:8000 \
 A new GHCR package is private; make it public in the package settings to pull it
 without logging in.
 
+With Docker Compose, `docker-compose.ghcr.yml` runs the prebuilt image with a
+subscription token, keeps the CLI's state in a named volume, binds the port to
+localhost and raises the chat rate limit for agent use:
+
+```bash
+echo 'CLAUDE_CODE_OAUTH_TOKEN=<token from claude setup-token>' > .env && chmod 600 .env
+docker compose -f docker-compose.ghcr.yml up -d
+```
+
 ### Build
 
 ```bash
