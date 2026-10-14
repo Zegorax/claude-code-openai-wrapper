@@ -606,7 +606,7 @@ See `examples/session_continuity.py` for comprehensive Python examples and `exam
 (`"auto"`, `"none"`, `"required"` or `{"type": "function", "function": {"name": ...}}`),
 `parallel_tool_calls`, assistant messages with `tool_calls` (and `content: null`),
 and `role: "tool"` results. The client runs the tools itself; Claude Code's built-in
-tools stay disabled and every request is a single model turn, so agent runtimes such
+tools are not offered at all and every request is a single model turn, so agent runtimes such
 as [QwenPaw](https://github.com/agentscope-ai/QwenPaw) keep their own memory, context
 management and tool approval.
 
@@ -624,37 +624,55 @@ management and tool approval.
 - With `stream: true`, text streams token by token. Streaming stops at the first
   `<tool_call>` tag; the calls follow as `delta.tool_calls` chunks once the reply is
   complete. No tag fragments reach the client.
+- Claude sometimes keeps going after a call and writes an invented `<tool_result>`
+  or the user's next turn. Generation is stopped there and that text is discarded.
 - If a reply contains `<tool_call>` markup but no usable call and no text has been
   sent yet, the request is retried once with a short correction
   (`TOOL_CALL_RETRY=false` to disable). Otherwise the markup is returned as text.
-- `usage` reports the real token counts from the Claude Agent SDK, including cache
-  reads and writes.
+- The Claude Code CLI tells Claude its own working directory. When the wrapper runs
+  in its private temporary directory (no `CLAUDE_CWD`), that directory is removed
+  from tool-call arguments, since it is never a valid path for the client.
+- `usage` reports the real token counts from the Claude Agent SDK, with cache reads
+  in `prompt_tokens_details.cached_tokens`. Steps stopped early fall back to an
+  estimate.
 
-Requests without tools or tool messages use the original code path unchanged. Set
+Requests without tools or tool messages use the original code path. Set
 `STREAM_PARTIAL=true` to also stream those token by token (only when `enable_tools`
-is off).
+is off). On both paths, a request with `enable_tools` off now passes `tools=[]` to the
+CLI: the old disallowed-tools list missed newer built-in tools such as `ToolSearch`,
+which Claude could still call (leaving an empty reply), and their definitions added
+roughly 10-25k input tokens to every request.
 
 ### QwenPaw setup
 
 1. Run the wrapper on the QwenPaw host with Claude Code authentication, for example
    `claude setup-token`, then `export CLAUDE_CODE_OAUTH_TOKEN=...` and
    `CLAUDE_AUTH_METHOD=cli`. The token is only read by the bundled Claude Code CLI
-   from its environment; the wrapper never sends it over HTTP.
+   from its environment; the wrapper never sends it over HTTP. If the host also runs
+   Claude Code interactively, consider `CLAUDE_CONFIG_DIR=<empty dir>` for the
+   wrapper so the CLI doesn't load that user's settings, plugins and memory.
 2. In QwenPaw Console → Settings → Models, add a custom OpenAI-compatible provider
    with base URL `http://127.0.0.1:8000/v1` and any API key (or the wrapper's
    `API_KEY` if protection is on).
 3. Add a model id listed by `GET /v1/models`, for example `claude-sonnet-4-6`.
-4. Mark the model as supporting tool calling (`supports_tool_calling`). QwenPaw
-   leaves models without it out of tool-using queries.
+4. Make it the active model. QwenPaw 2.2.1 has no per-model tool-calling flag to
+   set; it sends its tools to the active model on every step.
+
+Tested end to end with QwenPaw 2.2.1 (`qwenpaw app`, Console chat API): plain
+answers, file reads, multi-step tool chains, a scheduled agent job, and a Tool Guard
+approval prompt (denied) for an `rm -rf` command. QwenPaw's headless `qwenpaw task`
+command builds its agent without workspace tools, so tool use needs the app.
 
 ### Latency and usage
 
 Each agent step starts a new Claude Code process and sends the full history, so a
 task with N tool calls costs N+1 complete runs, and input tokens grow with every
 step. The system prompt (with the tool schemas) is rendered identically on every
-call so it can be served from Claude's prompt cache; the conversation itself is one
-growing block and is mostly not cached. Each step logs `duration_ms`,
-`duration_api_ms` and token usage, including cache reads, at INFO level.
+call so it is served from Claude's prompt cache. With QwenPaw (about 17k input
+tokens per step), steps after the first read about 96% of their input from cache,
+and each step took 2.5-5 s of wall time, of which roughly 1-2 s is CLI start-up.
+Each step logs `duration_ms`, `duration_api_ms` and token usage, including cache
+reads, at INFO level.
 
 Use this with your own subscription for your own use only. Don't put a shared or
 public QwenPaw instance (for example a public chat channel) on it.
