@@ -304,6 +304,24 @@ RATE_LIMIT_HEALTH_PER_MINUTE=30
 
 Build and run the wrapper in a Docker container.
 
+### Prebuilt image
+
+The `Docker` workflow builds a multi-arch image (`linux/amd64`, `linux/arm64`) and
+pushes it to the GitHub Container Registry on every push to `main` (`latest`, `main`),
+for version tags (`v2.3.0` → `2.3.0`, `2.3`), and for pull requests from this
+repository (`pr-<number>`). Every image is also tagged `sha-<commit>`.
+
+```bash
+docker run -d -p 8000:8000 \
+  -e CLAUDE_AUTH_METHOD=cli \
+  -e CLAUDE_CODE_OAUTH_TOKEN=... \
+  --name claude-wrapper \
+  ghcr.io/<owner>/claude-code-openai-wrapper:latest
+```
+
+A new GHCR package is private; make it public in the package settings to pull it
+without logging in.
+
 ### Build
 
 ```bash
