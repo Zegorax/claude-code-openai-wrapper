@@ -322,14 +322,31 @@ docker run -d -p 8000:8000 \
 A new GHCR package is private; make it public in the package settings to pull it
 without logging in.
 
-With Docker Compose, `docker-compose.ghcr.yml` runs the prebuilt image with a
-subscription token, keeps the CLI's state in a named volume, binds the port to
-localhost and raises the chat rate limit for agent use:
+`docker-compose.ghcr.yml` runs the prebuilt image together with
+[QwenPaw](https://github.com/agentscope-ai/QwenPaw) (`agentscope/qwenpaw:v2.2.1`),
+already wired together:
 
 ```bash
 echo 'CLAUDE_CODE_OAUTH_TOKEN=<token from claude setup-token>' > .env && chmod 600 .env
 docker compose -f docker-compose.ghcr.yml up -d
+# QwenPaw Console: http://127.0.0.1:8088   Wrapper API: http://127.0.0.1:8000/v1
 ```
+
+- A one-shot `qwenpaw-setup` container (`deploy/qwenpaw-setup.py`) registers the
+  wrapper as QwenPaw's provider (`http://claude-wrapper:8000/v1`), adds the models
+  in `CLAUDE_MODELS` (default `claude-sonnet-4-6,claude-opus-4-6`) and makes the
+  first one active if no model is active yet. It runs on every start and leaves a
+  model chosen later in the Console alone.
+- Both ports are bound to localhost. Set `API_KEY` to protect the wrapper (the setup
+  passes it to QwenPaw) and `QWENPAW_AUTH_ENABLED=true` with
+  `QWENPAW_AUTH_USERNAME`/`QWENPAW_AUTH_PASSWORD` before exposing QwenPaw.
+- The chat rate limit is raised to 60 requests per minute; an agent makes one
+  request per step.
+- State lives in named volumes: the CLI's in `claude-data`, QwenPaw's in
+  `qwenpaw-data`, `qwenpaw-secrets` and `qwenpaw-backups`.
+- QwenPaw's non-interactive init sets up the agent in Chinese; change the language
+  in the Console settings.
+- To run only the wrapper: `docker compose -f docker-compose.ghcr.yml up -d claude-wrapper`.
 
 ### Build
 

@@ -1,12 +1,13 @@
-# Run the prebuilt image from GHCR, authenticated with a Claude Code
-# subscription token, e.g. as the model backend for QwenPaw.
+# QwenPaw with a Claude Code subscription as its only model: the prebuilt
+# wrapper image from GHCR plus QwenPaw, already wired together.
 #
 #   1. claude setup-token            # on any machine with Claude Code
 #   2. echo 'CLAUDE_CODE_OAUTH_TOKEN=<token>' > .env && chmod 600 .env
 #   3. docker compose -f docker-compose.ghcr.yml up -d
+#   4. open http://127.0.0.1:8088 (QwenPaw Console)
 #
-# OpenAI base URL for clients: http://127.0.0.1:8000/v1
-# (from another container on the same compose network: http://claude-wrapper:8000/v1)
+# The wrapper's OpenAI API is also available at http://127.0.0.1:8000/v1.
+# To run only the wrapper: docker compose -f docker-compose.ghcr.yml up -d claude-wrapper
 services:
   claude-wrapper:
     # Use :pr-<number> to run a pull request build before it is merged.
@@ -39,5 +40,52 @@ services:
       start_period: 60s
       retries: 3
 
+  # One-shot: registers the wrapper as QwenPaw's provider and sets the active
+  # model if none is set yet (see deploy/qwenpaw-setup.py). Runs on every start.
+  qwenpaw-setup:
+    image: ${QWENPAW_IMAGE:-agentscope/qwenpaw:v2.2.1}
+    entrypoint: []
+    command:
+      - sh
+      - -c
+      - |
+        [ -f "$$QWENPAW_WORKING_DIR/config.json" ] || qwenpaw init --defaults --accept-security
+        python /setup/qwenpaw-setup.py
+    environment:
+      WRAPPER_BASE_URL: http://claude-wrapper:8000/v1
+      WRAPPER_API_KEY: ${API_KEY:-}
+      CLAUDE_MODELS: ${CLAUDE_MODELS:-claude-sonnet-4-6,claude-opus-4-6}
+    volumes:
+      - ./deploy/qwenpaw-setup.py:/setup/qwenpaw-setup.py:ro
+      - qwenpaw-data:/app/working
+      - qwenpaw-secrets:/app/working.secret
+      - qwenpaw-backups:/app/working.backups
+    restart: "no"
+
+  qwenpaw:
+    image: ${QWENPAW_IMAGE:-agentscope/qwenpaw:v2.2.1}
+    container_name: qwenpaw
+    restart: unless-stopped
+    depends_on:
+      claude-wrapper:
+        condition: service_healthy
+      qwenpaw-setup:
+        condition: service_completed_successfully
+    ports:
+      # Localhost only. Set QWENPAW_AUTH_ENABLED=true (with a username and
+      # password) in .env before exposing it further.
+      - "127.0.0.1:8088:8088"
+    environment:
+      QWENPAW_AUTH_ENABLED: ${QWENPAW_AUTH_ENABLED:-false}
+      QWENPAW_AUTH_USERNAME: ${QWENPAW_AUTH_USERNAME:-}
+      QWENPAW_AUTH_PASSWORD: ${QWENPAW_AUTH_PASSWORD:-}
+    volumes:
+      - qwenpaw-data:/app/working
+      - qwenpaw-secrets:/app/working.secret
+      - qwenpaw-backups:/app/working.backups
+
 volumes:
   claude-data:
+  qwenpaw-data:
+  qwenpaw-secrets:
+  qwenpaw-backups:
