@@ -1,5 +1,5 @@
 from typing import List, Optional, Dict, Any, Union, Literal
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_serializer, model_validator
 from datetime import datetime
 import uuid
 import logging
@@ -19,17 +19,51 @@ def get_default_model():
     return constants.RESOLVED_DEFAULT_MODEL or constants.DEFAULT_MODEL_FALLBACK
 
 
+class ImageURL(BaseModel):
+    url: str
+    detail: Optional[str] = None
+
+
 class ContentPart(BaseModel):
     """Content part for multimodal messages (OpenAI format)."""
 
-    type: Literal["text"]
-    text: str
+    type: Literal["text", "image_url"]
+    text: Optional[str] = None
+    image_url: Optional[ImageURL] = None
+
+
+# Images are not forwarded to Claude Code yet; each one becomes this placeholder.
+IMAGE_PLACEHOLDER = "[image omitted]"
+
+
+class FunctionCall(BaseModel):
+    name: str
+    arguments: str = "{}"
+
+
+class ToolCall(BaseModel):
+    id: str
+    type: Literal["function"] = "function"
+    function: FunctionCall
+
+
+class FunctionDefinition(BaseModel):
+    name: str
+    description: Optional[str] = None
+    parameters: Optional[Dict[str, Any]] = None
+
+
+class ToolDefinition(BaseModel):
+    type: Literal["function"] = "function"
+    function: FunctionDefinition
 
 
 class Message(BaseModel):
-    role: Literal["system", "user", "assistant"]
-    content: Union[str, List[ContentPart]]
+    role: Literal["system", "user", "assistant", "tool", "developer"]
+    content: Optional[Union[str, List[ContentPart]]] = None
     name: Optional[str] = None
+    tool_calls: Optional[List[ToolCall]] = None
+    tool_call_id: Optional[str] = None
 
     @model_validator(mode="after")
     def normalize_content(self):
@@ -39,7 +73,9 @@ class Message(BaseModel):
             text_parts = []
             for part in self.content:
                 if isinstance(part, ContentPart) and part.type == "text":
-                    text_parts.append(part.text)
+                    text_parts.append(part.text or "")
+                elif isinstance(part, ContentPart) and part.type == "image_url":
+                    text_parts.append(IMAGE_PLACEHOLDER)
                 elif isinstance(part, dict) and part.get("type") == "text":
                     text_parts.append(part.get("text", ""))
 
@@ -47,6 +83,15 @@ class Message(BaseModel):
             self.content = "\n".join(text_parts) if text_parts else ""
 
         return self
+
+    @model_serializer(mode="wrap")
+    def _omit_unset_tool_fields(self, handler):
+        # Keep responses without tool calls identical to the pre-tool-calling shape.
+        data = handler(self)
+        for key in ("tool_calls", "tool_call_id"):
+            if data.get(key) is None:
+                data.pop(key, None)
+        return data
 
 
 class StreamOptions(BaseModel):
@@ -83,6 +128,25 @@ class ChatCompletionRequest(BaseModel):
     stream_options: Optional[StreamOptions] = Field(
         default=None, description="Options for streaming responses"
     )
+    tools: Optional[List[ToolDefinition]] = Field(
+        default=None, description="OpenAI function-calling tool definitions"
+    )
+    tool_choice: Optional[Union[Literal["auto", "none", "required"], Dict[str, Any]]] = None
+    parallel_tool_calls: Optional[bool] = None
+
+    def tool_calling_enabled(self) -> bool:
+        """True when Claude should be offered the request's tools."""
+        return bool(self.tools) and self.tool_choice != "none"
+
+    def uses_tool_features(self) -> bool:
+        """True when the request needs the tool-calling code path.
+
+        That is: tools are offered, or the history contains tool calls or
+        tool results that the plain prompt format cannot represent.
+        """
+        if self.tools:
+            return True
+        return any(m.role == "tool" or m.tool_calls for m in self.messages)
 
     @field_validator("n")
     @classmethod
@@ -206,13 +270,27 @@ class ChatCompletionRequest(BaseModel):
 class Choice(BaseModel):
     index: int
     message: Message
-    finish_reason: Optional[Literal["stop", "length", "content_filter", "null"]] = None
+    finish_reason: Optional[Literal["stop", "length", "tool_calls", "content_filter", "null"]] = (
+        None
+    )
+
+
+class PromptTokensDetails(BaseModel):
+    cached_tokens: int = 0
 
 
 class Usage(BaseModel):
     prompt_tokens: int
     completion_tokens: int
     total_tokens: int
+    prompt_tokens_details: Optional[PromptTokensDetails] = None
+
+    @model_serializer(mode="wrap")
+    def _omit_unset_details(self, handler):
+        data = handler(self)
+        if data.get("prompt_tokens_details") is None:
+            data.pop("prompt_tokens_details", None)
+        return data
 
 
 class ChatCompletionResponse(BaseModel):
@@ -228,7 +306,9 @@ class ChatCompletionResponse(BaseModel):
 class StreamChoice(BaseModel):
     index: int
     delta: Dict[str, Any]
-    finish_reason: Optional[Literal["stop", "length", "content_filter", "null"]] = None
+    finish_reason: Optional[Literal["stop", "length", "tool_calls", "content_filter", "null"]] = (
+        None
+    )
 
 
 class ChatCompletionStreamResponse(BaseModel):

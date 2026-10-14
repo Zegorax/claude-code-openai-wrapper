@@ -10,6 +10,9 @@ from claude_agent_sdk import query, ClaudeAgentOptions
 
 logger = logging.getLogger(__name__)
 
+# System prompts larger than this (bytes) are passed via --system-prompt-file.
+SYSTEM_PROMPT_FILE_THRESHOLD = 100_000
+
 
 class ClaudeCodeCLI:
     def __init__(self, timeout: int = 600000, cwd: Optional[str] = None):
@@ -104,9 +107,17 @@ class ClaudeCodeCLI:
         session_id: Optional[str] = None,
         continue_session: bool = False,
         permission_mode: Optional[str] = None,
+        include_partial_messages: bool = False,
+        tools: Optional[List[str]] = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
-        """Run Claude Agent using the Python SDK and yield response chunks."""
+        """Run Claude Agent using the Python SDK and yield response chunks.
 
+        With include_partial_messages=True the SDK also yields raw API stream
+        events (converted to dicts with an "event" key) carrying text deltas.
+        tools sets the base set of built-in tools; [] offers none at all.
+        """
+
+        system_prompt_file = None
         try:
             # Set authentication environment variables (if any)
             original_env = {}
@@ -126,12 +137,26 @@ class ClaudeCodeCLI:
                 # Set system prompt - CLAUDE AGENT SDK STRUCTURED FORMAT
                 # Use structured format as per SDK documentation
                 if system_prompt:
-                    options.system_prompt = {"type": "text", "text": system_prompt}
+                    # The SDK only understands "custom", "file" and "preset"; any
+                    # other shape is silently dropped. Large prompts (e.g. many
+                    # tool schemas) go through a file because a single argv entry
+                    # is capped at 128 KiB on Linux.
+                    if len(system_prompt.encode("utf-8")) > SYSTEM_PROMPT_FILE_THRESHOLD:
+                        fd, system_prompt_file = tempfile.mkstemp(
+                            prefix="claude_system_prompt_", suffix=".txt"
+                        )
+                        with os.fdopen(fd, "w", encoding="utf-8") as f:
+                            f.write(system_prompt)
+                        options.system_prompt = {"type": "file", "path": system_prompt_file}
+                    else:
+                        options.system_prompt = {"type": "custom", "prompt": system_prompt}
                 else:
                     # Use Claude Code preset to maintain expected behavior
                     options.system_prompt = {"type": "preset", "preset": "claude_code"}
 
                 # Set tool restrictions
+                if tools is not None:
+                    options.tools = tools
                 if allowed_tools:
                     options.allowed_tools = allowed_tools
                 if disallowed_tools:
@@ -140,6 +165,9 @@ class ClaudeCodeCLI:
                 # Set permission mode (needed for tool execution in API context)
                 if permission_mode:
                     options.permission_mode = permission_mode
+
+                if include_partial_messages:
+                    options.include_partial_messages = True
 
                 # Handle session continuity
                 if continue_session:
@@ -191,6 +219,12 @@ class ClaudeCodeCLI:
                 "is_error": True,
                 "error_message": str(e),
             }
+        finally:
+            if system_prompt_file:
+                try:
+                    os.unlink(system_prompt_file)
+                except OSError:
+                    pass
 
     def parse_claude_message(self, messages: List[Dict[str, Any]]) -> Optional[str]:
         """Extract the assistant message from Claude Agent SDK messages.

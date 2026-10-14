@@ -43,6 +43,7 @@ from src.models import (
 )
 from src.claude_cli import ClaudeCodeCLI
 from src.message_adapter import MessageAdapter
+from src import tool_calling
 from src.auth import verify_api_key, security, validate_claude_code_auth, get_claude_code_auth_info
 from src.parameter_validator import ParameterValidator, CompatibilityReporter
 from src.session_manager import session_manager
@@ -74,6 +75,10 @@ load_dotenv()
 # Configure logging based on debug mode
 DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() in ("true", "1", "yes", "on")
 VERBOSE = os.getenv("VERBOSE", "false").lower() in ("true", "1", "yes", "on")
+
+# Stream text deltas for plain (tool-free) requests too. Requests that use
+# OpenAI function calling always stream deltas.
+STREAM_PARTIAL = os.getenv("STREAM_PARTIAL", "false").lower() in ("true", "1", "yes", "on")
 
 # Set logging level based on debug/verbose mode
 log_level = logging.DEBUG if (DEBUG_MODE or VERBOSE) else logging.INFO
@@ -574,7 +579,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
                 "common_issues": [
                     "Missing required fields (model, messages)",
                     "Invalid field types (e.g. messages should be an array)",
-                    "Invalid role values (must be 'system', 'user', or 'assistant')",
+                    "Invalid role values (must be 'system', 'developer', 'user', 'assistant' or 'tool')",
                     "Invalid parameter ranges (e.g. temperature must be 0-2)",
                 ],
                 "debug_tip": "Set DEBUG_MODE=true or VERBOSE=true environment variable for more detailed logging",
@@ -587,6 +592,81 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         error_response["error"]["debug"] = debug_info
 
     return JSONResponse(status_code=422, content=error_response)
+
+
+def _uses_delta_path(request: ChatCompletionRequest) -> bool:
+    """Whether a request goes through the tool-calling / delta-streaming path."""
+    if request.uses_tool_features():
+        return True
+    return bool(request.stream and STREAM_PARTIAL and not request.enable_tools)
+
+
+def _prepare_delta_path(
+    request: ChatCompletionRequest, claude_headers: Optional[Dict[str, Any]]
+) -> tuple[str, Optional[str], Dict[str, Any], Optional[str]]:
+    """Build (prompt, system_prompt, options, session_id) for the delta path."""
+    all_messages, session_id = session_manager.process_messages(
+        request.messages, request.session_id
+    )
+    if request.uses_tool_features():
+        # Tool results are passed through unfiltered: they are file contents,
+        # command output etc. that filter_content would mangle.
+        prompt, system_prompt = tool_calling.render_prompt(request, all_messages)
+    else:
+        prompt, system_prompt = MessageAdapter.messages_to_prompt(all_messages)
+        prompt = MessageAdapter.filter_content(prompt)
+        if system_prompt:
+            system_prompt = MessageAdapter.filter_content(system_prompt)
+
+    sampling_instructions = request.get_sampling_instructions()
+    if sampling_instructions:
+        system_prompt = (
+            f"{system_prompt}\n\n{sampling_instructions}"
+            if system_prompt
+            else sampling_instructions
+        )
+
+    options = request.to_claude_options()
+    if claude_headers:
+        options.update(claude_headers)
+    if options.get("model"):
+        ParameterValidator.validate_model(options["model"])
+
+    if request.enable_tools:
+        logger.warning("enable_tools is ignored for requests that use OpenAI tool calling")
+    # The client runs the tools; Claude Code's own tools are not offered at
+    # all (tools=[] also keeps their definitions out of the prompt) and each
+    # request is a single model turn.
+    options["tools"] = []
+    options["disallowed_tools"] = CLAUDE_TOOLS
+    options["max_turns"] = 1
+    # The CLI tells Claude its own working directory, and Claude sometimes
+    # puts it into tool arguments. The wrapper's private temp directory can
+    # never be a valid path for the client, so it is stripped from them.
+    if claude_cli.temp_dir:
+        options["private_cwd"] = str(claude_cli.cwd)
+    return prompt, system_prompt, options, session_id
+
+
+async def generate_delta_streaming_response(
+    request: ChatCompletionRequest, request_id: str, claude_headers: Optional[Dict[str, Any]] = None
+) -> AsyncGenerator[str, None]:
+    """SSE stream for the delta path: text deltas as they arrive, then tool calls."""
+    try:
+        prompt, system_prompt, options, session_id = _prepare_delta_path(request, claude_headers)
+
+        def store(message: Message) -> None:
+            if session_id:
+                session_manager.add_assistant_response(session_id, message)
+
+        async for line in tool_calling.stream_tool_completion(
+            claude_cli, request, request_id, prompt, system_prompt, options, on_complete=store
+        ):
+            yield line
+    except Exception as e:
+        logger.error(f"Streaming error: {e}")
+        error_chunk = {"error": {"message": str(e), "type": "streaming_error"}}
+        yield f"data: {json.dumps(error_chunk)}\n\n"
 
 
 async def generate_streaming_response(
@@ -632,6 +712,9 @@ async def generate_streaming_response(
             # Disable all tools by using CLAUDE_TOOLS constant
             claude_options["disallowed_tools"] = CLAUDE_TOOLS
             claude_options["max_turns"] = 1  # Single turn for Q&A
+            # The disallowed list misses newer built-in tools (ToolSearch,
+            # Agent, ...); tools=[] offers none at all.
+            claude_options["tools"] = []
             logger.info("Tools disabled (default behavior for OpenAI compatibility)")
         else:
             # Enable tools - use default safe subset (Read, Glob, Grep, Bash, Write, Edit)
@@ -652,6 +735,7 @@ async def generate_streaming_response(
             max_turns=claude_options.get("max_turns", 10),
             allowed_tools=claude_options.get("allowed_tools"),
             disallowed_tools=claude_options.get("disallowed_tools"),
+            tools=claude_options.get("tools"),
             permission_mode=claude_options.get("permission_mode"),
             stream=True,
         ):
@@ -842,13 +926,33 @@ async def chat_completions(
 
         if request_body.stream:
             # Return streaming response
+            generator = (
+                generate_delta_streaming_response
+                if _uses_delta_path(request_body)
+                else generate_streaming_response
+            )
             return StreamingResponse(
-                generate_streaming_response(request_body, request_id, claude_headers),
+                generator(request_body, request_id, claude_headers),
                 media_type="text/event-stream",
                 headers={
                     "Cache-Control": "no-cache",
                     "Connection": "keep-alive",
                 },
+            )
+        elif _uses_delta_path(request_body):
+            prompt, system_prompt, options, session_id = _prepare_delta_path(
+                request_body, claude_headers
+            )
+            message, finish_reason, usage = await tool_calling.run_tool_completion(
+                claude_cli, request_body, prompt, system_prompt, options
+            )
+            if session_id:
+                session_manager.add_assistant_response(session_id, message)
+            return ChatCompletionResponse(
+                id=request_id,
+                model=request_body.model,
+                choices=[Choice(index=0, message=message, finish_reason=finish_reason)],
+                usage=usage,
             )
         else:
             # Non-streaming response
@@ -894,6 +998,9 @@ async def chat_completions(
                 # Disable all tools by using CLAUDE_TOOLS constant
                 claude_options["disallowed_tools"] = CLAUDE_TOOLS
                 claude_options["max_turns"] = 1  # Single turn for Q&A
+                # The disallowed list misses newer built-in tools (ToolSearch,
+                # Agent, ...); tools=[] offers none at all.
+                claude_options["tools"] = []
                 logger.info("Tools disabled (default behavior for OpenAI compatibility)")
             else:
                 # Enable tools - use default safe subset (Read, Glob, Grep, Bash, Write, Edit)
@@ -911,6 +1018,7 @@ async def chat_completions(
                 max_turns=claude_options.get("max_turns", 10),
                 allowed_tools=claude_options.get("allowed_tools"),
                 disallowed_tools=claude_options.get("disallowed_tools"),
+                tools=claude_options.get("tools"),
                 permission_mode=claude_options.get("permission_mode"),
                 stream=False,
             ):

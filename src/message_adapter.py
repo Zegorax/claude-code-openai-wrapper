@@ -16,13 +16,14 @@ class MessageAdapter:
         conversation_parts = []
 
         for message in messages:
-            if message.role == "system":
+            content = message.content or ""
+            if message.role in ("system", "developer"):
                 # Use the last system message as the system prompt
-                system_prompt = message.content
+                system_prompt = content
             elif message.role == "user":
-                conversation_parts.append(f"Human: {message.content}")
+                conversation_parts.append(f"Human: {content}")
             elif message.role == "assistant":
-                conversation_parts.append(f"Assistant: {message.content}")
+                conversation_parts.append(f"Assistant: {content}")
 
         # Join conversation parts
         prompt = "\n\n".join(conversation_parts)
