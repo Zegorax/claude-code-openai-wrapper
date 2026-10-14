@@ -593,6 +593,24 @@ class TestClaudeCodeCLIRunCompletion:
         assert captured_options[1].include_partial_messages is False
 
     @pytest.mark.asyncio
+    async def test_run_completion_tools_option(self, cli_instance):
+        """tools=[] is forwarded so the CLI offers no built-in tools."""
+        captured_options = []
+
+        async def mock_query(prompt, options):
+            captured_options.append(options)
+            yield {"type": "assistant"}
+
+        with patch("src.claude_cli.query", mock_query):
+            async for _ in cli_instance.run_completion("Hello", tools=[]):
+                pass
+            async for _ in cli_instance.run_completion("Hello"):
+                pass
+
+        assert captured_options[0].tools == []
+        assert captured_options[1].tools is None
+
+    @pytest.mark.asyncio
     async def test_run_completion_with_model(self, cli_instance):
         """run_completion sets model option."""
         mock_message = {"type": "assistant"}

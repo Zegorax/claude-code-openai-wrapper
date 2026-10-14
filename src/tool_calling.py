@@ -23,6 +23,7 @@ from src.models import (
     ChatCompletionRequest,
     ChatCompletionStreamResponse,
     Message,
+    PromptTokensDetails,
     StreamChoice,
     ToolCall,
     ToolDefinition,
@@ -94,6 +95,10 @@ def build_tools_section(request: ChatCompletionRequest) -> str:
         '<tool_call>{"name": "<function-name>", "arguments": {<args as JSON object>}}</tool_call>',
         "You may write a short sentence before the blocks. Write nothing after them.",
         "Then stop; results come back in the next message as <tool_result> blocks.",
+        "Never write <tool_result> blocks or the user's next turn yourself.",
+        "The tools run on the user's system, not yours. Your own working directory and",
+        "environment details are unrelated to it: never add them to paths or arguments.",
+        "Pass paths exactly as the user or earlier tool results give them.",
         "If no tool is needed, answer normally without any <tool_call> block.",
     ]
     forced = _forced_function_name(request.tool_choice)
@@ -308,7 +313,23 @@ def parse_tool_section(text: str, request: ChatCompletionRequest) -> ParsedToolC
     return result
 
 
-def to_openai_tool_calls(calls: List[Dict[str, Any]]) -> List[ToolCall]:
+def strip_private_cwd(value: Any, cwd: Optional[str]) -> Any:
+    """Remove the wrapper's own working directory from tool-call arguments."""
+    if not cwd:
+        return value
+    if isinstance(value, dict):
+        return {k: strip_private_cwd(v, cwd) for k, v in value.items()}
+    if isinstance(value, list):
+        return [strip_private_cwd(v, cwd) for v in value]
+    if isinstance(value, str) and cwd in value:
+        logger.info("Removed the wrapper's working directory from a tool argument")
+        return "." if value == cwd else value.replace(cwd + "/", "").replace(cwd, ".")
+    return value
+
+
+def to_openai_tool_calls(
+    calls: List[Dict[str, Any]], private_cwd: Optional[str] = None
+) -> List[ToolCall]:
     return [
         ToolCall.model_validate(
             {
@@ -316,7 +337,9 @@ def to_openai_tool_calls(calls: List[Dict[str, Any]]) -> List[ToolCall]:
                 "type": "function",
                 "function": {
                     "name": call["name"],
-                    "arguments": json.dumps(call["arguments"], ensure_ascii=False),
+                    "arguments": json.dumps(
+                        strip_private_cwd(call["arguments"], private_cwd), ensure_ascii=False
+                    ),
                 },
             }
         )
@@ -366,6 +389,18 @@ class ToolCallStreamParser:
     @property
     def in_tool_section(self) -> bool:
         return self._mode == "tools"
+
+    @property
+    def turn_over(self) -> bool:
+        """True once Claude has started writing past the end of its own turn.
+
+        Everything after this point is discarded, so the SDK call can stop.
+        """
+        if self._mode == "stopped":
+            return True
+        if self._mode == "tools":
+            return HUMAN_LINE in self._tool_text or TOOL_RESULT_OPEN in self._tool_text
+        return False
 
     @property
     def emitted_any(self) -> bool:
@@ -534,6 +569,7 @@ async def _run_attempt(
         model=options.get("model"),
         max_turns=options.get("max_turns", 1),
         disallowed_tools=options.get("disallowed_tools"),
+        tools=options.get("tools"),
         stream=True,
         include_partial_messages=True,
     ):
@@ -548,6 +584,11 @@ async def _run_attempt(
             text = parser.feed(delta)
             if text:
                 yield text
+            if parser.turn_over:
+                # Claude is writing the next turn itself; the rest would be
+                # discarded, so stop generating instead of waiting for it.
+                logger.info("Stopping generation at a self-written next turn")
+                break
             continue
 
         if "event" in chunk:
@@ -578,15 +619,20 @@ async def _run_attempt(
 
 def _usage(prompt: str, completion: str, sdk_usage: Optional[Dict[str, Any]]) -> Usage:
     if sdk_usage and "input_tokens" in sdk_usage:
+        cached = int(sdk_usage.get("cache_read_input_tokens") or 0)
         prompt_tokens = int(
             sdk_usage.get("input_tokens", 0)
             + (sdk_usage.get("cache_creation_input_tokens") or 0)
-            + (sdk_usage.get("cache_read_input_tokens") or 0)
+            + cached
         )
-        completion_tokens = int(sdk_usage.get("output_tokens", 0))
-    else:
-        prompt_tokens = max(1, len(prompt) // 4)
-        completion_tokens = max(1, len(completion) // 4)
+        return Usage(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=int(sdk_usage.get("output_tokens", 0)),
+            total_tokens=prompt_tokens + int(sdk_usage.get("output_tokens", 0)),
+            prompt_tokens_details=PromptTokensDetails(cached_tokens=cached),
+        )
+    prompt_tokens = max(1, len(prompt) // 4)
+    completion_tokens = max(1, len(completion) // 4)
     return Usage(
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
@@ -622,7 +668,9 @@ async def run_tool_completion(
         break
 
     content = head + tail
-    tool_calls = to_openai_tool_calls(parsed.calls) if parsed.calls else None
+    tool_calls = (
+        to_openai_tool_calls(parsed.calls, options.get("private_cwd")) if parsed.calls else None
+    )
     message = Message(role="assistant", content=content or None, tool_calls=tool_calls)
     finish_reason = "tool_calls" if tool_calls else "stop"
     return message, finish_reason, _usage(prompt, parser.raw, result.usage)
@@ -666,7 +714,9 @@ async def stream_tool_completion(
     if tail:
         yield _sse(request_id, model, {"content": tail})
 
-    tool_calls = to_openai_tool_calls(parsed.calls) if parsed.calls else []
+    tool_calls = (
+        to_openai_tool_calls(parsed.calls, options.get("private_cwd")) if parsed.calls else []
+    )
     for index, call in enumerate(tool_calls):
         delta = {"tool_calls": [{"index": index, **call.model_dump()}]}
         yield _sse(request_id, model, delta)

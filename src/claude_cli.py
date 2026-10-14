@@ -108,11 +108,13 @@ class ClaudeCodeCLI:
         continue_session: bool = False,
         permission_mode: Optional[str] = None,
         include_partial_messages: bool = False,
+        tools: Optional[List[str]] = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Run Claude Agent using the Python SDK and yield response chunks.
 
         With include_partial_messages=True the SDK also yields raw API stream
         events (converted to dicts with an "event" key) carrying text deltas.
+        tools sets the base set of built-in tools; [] offers none at all.
         """
 
         system_prompt_file = None
@@ -153,6 +155,8 @@ class ClaudeCodeCLI:
                     options.system_prompt = {"type": "preset", "preset": "claude_code"}
 
                 # Set tool restrictions
+                if tools is not None:
+                    options.tools = tools
                 if allowed_tools:
                     options.allowed_tools = allowed_tools
                 if disallowed_tools:

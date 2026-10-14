@@ -8,6 +8,7 @@ from pydantic import ValidationError
 from src.models import ChatCompletionRequest, Message
 from src.tool_calling import (
     ToolCallStreamParser,
+    strip_private_cwd,
     build_tools_section,
     parse_complete_reply,
     render_prompt,
@@ -391,3 +392,33 @@ class TestStreamParser:
         parser.feed("<tool_call>{oops</tool_call>")
         assert parser.tool_calls_unusable()
         assert not parser.emitted_any
+
+
+class TestPrivateCwd:
+    CWD = "/tmp/claude_code_workspace_abc"
+
+    def test_strips_prefix_from_nested_strings(self):
+        args = {
+            "path": f"{self.CWD}/notes.txt",
+            "dir": self.CWD,
+            "cmd": f"cat {self.CWD}/a.txt",
+            "list": [f"{self.CWD}/b", 3],
+            "other": "/home/user/notes.txt",
+        }
+        assert strip_private_cwd(args, self.CWD) == {
+            "path": "notes.txt",
+            "dir": ".",
+            "cmd": "cat a.txt",
+            "list": ["b", 3],
+            "other": "/home/user/notes.txt",
+        }
+
+    def test_no_cwd_leaves_arguments(self):
+        args = {"path": f"{self.CWD}/notes.txt"}
+        assert strip_private_cwd(args, None) == args
+
+    def test_applied_to_openai_tool_calls(self):
+        [call] = to_openai_tool_calls(
+            [{"name": "read_file", "arguments": {"path": f"{self.CWD}/x.txt"}}], self.CWD
+        )
+        assert json.loads(call.function.arguments) == {"path": "x.txt"}

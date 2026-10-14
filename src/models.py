@@ -275,10 +275,22 @@ class Choice(BaseModel):
     )
 
 
+class PromptTokensDetails(BaseModel):
+    cached_tokens: int = 0
+
+
 class Usage(BaseModel):
     prompt_tokens: int
     completion_tokens: int
     total_tokens: int
+    prompt_tokens_details: Optional[PromptTokensDetails] = None
+
+    @model_serializer(mode="wrap")
+    def _omit_unset_details(self, handler):
+        data = handler(self)
+        if data.get("prompt_tokens_details") is None:
+            data.pop("prompt_tokens_details", None)
+        return data
 
 
 class ChatCompletionResponse(BaseModel):

@@ -634,10 +634,17 @@ def _prepare_delta_path(
 
     if request.enable_tools:
         logger.warning("enable_tools is ignored for requests that use OpenAI tool calling")
-    # The client runs the tools; Claude Code's own tools stay off and each
+    # The client runs the tools; Claude Code's own tools are not offered at
+    # all (tools=[] also keeps their definitions out of the prompt) and each
     # request is a single model turn.
+    options["tools"] = []
     options["disallowed_tools"] = CLAUDE_TOOLS
     options["max_turns"] = 1
+    # The CLI tells Claude its own working directory, and Claude sometimes
+    # puts it into tool arguments. The wrapper's private temp directory can
+    # never be a valid path for the client, so it is stripped from them.
+    if claude_cli.temp_dir:
+        options["private_cwd"] = str(claude_cli.cwd)
     return prompt, system_prompt, options, session_id
 
 
@@ -705,6 +712,9 @@ async def generate_streaming_response(
             # Disable all tools by using CLAUDE_TOOLS constant
             claude_options["disallowed_tools"] = CLAUDE_TOOLS
             claude_options["max_turns"] = 1  # Single turn for Q&A
+            # The disallowed list misses newer built-in tools (ToolSearch,
+            # Agent, ...); tools=[] offers none at all.
+            claude_options["tools"] = []
             logger.info("Tools disabled (default behavior for OpenAI compatibility)")
         else:
             # Enable tools - use default safe subset (Read, Glob, Grep, Bash, Write, Edit)
@@ -725,6 +735,7 @@ async def generate_streaming_response(
             max_turns=claude_options.get("max_turns", 10),
             allowed_tools=claude_options.get("allowed_tools"),
             disallowed_tools=claude_options.get("disallowed_tools"),
+            tools=claude_options.get("tools"),
             permission_mode=claude_options.get("permission_mode"),
             stream=True,
         ):
@@ -987,6 +998,9 @@ async def chat_completions(
                 # Disable all tools by using CLAUDE_TOOLS constant
                 claude_options["disallowed_tools"] = CLAUDE_TOOLS
                 claude_options["max_turns"] = 1  # Single turn for Q&A
+                # The disallowed list misses newer built-in tools (ToolSearch,
+                # Agent, ...); tools=[] offers none at all.
+                claude_options["tools"] = []
                 logger.info("Tools disabled (default behavior for OpenAI compatibility)")
             else:
                 # Enable tools - use default safe subset (Read, Glob, Grep, Bash, Write, Edit)
@@ -1004,6 +1018,7 @@ async def chat_completions(
                 max_turns=claude_options.get("max_turns", 10),
                 allowed_tools=claude_options.get("allowed_tools"),
                 disallowed_tools=claude_options.get("disallowed_tools"),
+                tools=claude_options.get("tools"),
                 permission_mode=claude_options.get("permission_mode"),
                 stream=False,
             ):

@@ -65,12 +65,14 @@ class FakeSDK:
         self.replies = list(replies)
         self.partial = partial
         self.calls = []
+        self.chunks_consumed = 0
 
     async def run_completion(self, **kwargs):
         self.calls.append(kwargs)
         reply = self.replies.pop(0)
         partial = self.partial and kwargs.get("include_partial_messages", False)
-        for chunk in sdk_chunks(reply, partial=partial):
+        for chunk in sdk_chunks(reply, pieces=20, partial=partial):
+            self.chunks_consumed += 1
             yield chunk
 
 
@@ -138,12 +140,19 @@ class TestNonStreaming:
         kwargs = sdk.calls[0]
         assert kwargs["disallowed_tools"] == CLAUDE_TOOLS
         assert kwargs["max_turns"] == 1
+        # No built-in Claude Code tools are offered at all.
+        assert kwargs["tools"] == []
         assert "<tools>" in kwargs["system_prompt"]
 
     def test_real_usage_reported(self, client, fake_sdk):
         fake_sdk("Done.")
         usage = client.post("/v1/chat/completions", json=tool_request()).json()["usage"]
-        assert usage == {"prompt_tokens": 115, "completion_tokens": 7, "total_tokens": 122}
+        assert usage == {
+            "prompt_tokens": 115,
+            "completion_tokens": 7,
+            "total_tokens": 122,
+            "prompt_tokens_details": {"cached_tokens": 100},
+        }
 
     def test_plain_answer(self, client, fake_sdk):
         fake_sdk("The file says hello.")
@@ -191,6 +200,28 @@ class TestNonStreaming:
         assert len(sdk.calls) == 1
         assert choice["finish_reason"] == "stop"
         assert choice["message"]["content"] == "<tool_call>{broken</tool_call>"
+
+    def test_generation_stops_at_self_written_turn(self, client, fake_sdk):
+        invented = CALL_REPLY + '\n<tool_result id="x">invented output</tool_result>\n' + "x" * 400
+        sdk = fake_sdk(invented)
+        choice = client.post("/v1/chat/completions", json=tool_request()).json()["choices"][0]
+        assert choice["finish_reason"] == "tool_calls"
+        assert len(choice["message"]["tool_calls"]) == 1
+        assert "invented" not in (choice["message"]["content"] or "")
+        total = len(sdk_chunks(invented, pieces=20))
+        assert sdk.chunks_consumed < total - 5
+
+    def test_private_cwd_removed_from_arguments(self, client, fake_sdk):
+        cwd = str(main.claude_cli.cwd)
+        fake_sdk(
+            '<tool_call>{"name": "read_file", "arguments": {"path": "'
+            + cwd
+            + '/a.txt"}}</tool_call>'
+        )
+        with patch.object(main.claude_cli, "temp_dir", cwd):
+            choice = client.post("/v1/chat/completions", json=tool_request()).json()["choices"][0]
+        args = json.loads(choice["message"]["tool_calls"][0]["function"]["arguments"])
+        assert args == {"path": "a.txt"}
 
     def test_works_without_partial_messages(self, client, fake_sdk):
         fake_sdk(CALL_REPLY, partial=False)
@@ -351,6 +382,7 @@ class TestNoToolsRegression:
         assert deltas == [{"role": "assistant", "content": ""}, {"content": "Hello!"}, {}]
         assert events[-1] == "[DONE]"
         assert "include_partial_messages" not in sdk.calls[0]
+        assert sdk.calls[0]["tools"] == []
 
     def test_stream_partial_flag(self, client, fake_sdk):
         sdk = fake_sdk("Hello there, this is streamed.")
