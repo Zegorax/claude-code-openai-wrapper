@@ -335,8 +335,10 @@ docker compose -f docker-compose.ghcr.yml up -d
 - A one-shot `qwenpaw-setup` container (`deploy/qwenpaw-setup.py`) registers the
   wrapper as QwenPaw's provider (`http://claude-wrapper:8000/v1`), adds the models
   the wrapper lists for your account (or those in `CLAUDE_MODELS`) and makes the
-  first one, the recommended model, active if no model is active yet. It runs on every start and leaves a
-  model chosen later in the Console alone.
+  first one, the recommended model, active if no model is active yet. It runs on every
+  start and leaves a model chosen later in the Console alone. If the wrapper can't
+  list models yet, the provider is registered without models; restart the service
+  or sync the provider's models in the Console later.
 - Both ports are bound to localhost. Set `API_KEY` to protect the wrapper (the setup
   passes it to QwenPaw) and `QWENPAW_AUTH_ENABLED=true` with
   `QWENPAW_AUTH_USERNAME`/`QWENPAW_AUTH_PASSWORD` before exposing QwenPaw.
@@ -411,11 +413,9 @@ Run: `docker-compose up -d` | Stop: `docker-compose down`
 | `CLAUDE_AUTH_METHOD` | Auth method: `cli`, `api_key`, `bedrock`, `vertex` | auto-detect |
 | `ANTHROPIC_API_KEY` | Direct Anthropic API key. Optional — also unlocks live `/v1/models` discovery and dynamic latest-Sonnet default. Not required when using Bedrock, Vertex, or Claude CLI subscription auth. | - |
 | `API_KEYS` | Comma-separated client API keys | - |
-| `DEFAULT_MODEL` | Override the default model. When unset and `ANTHROPIC_API_KEY` is configured, the wrapper resolves the latest Sonnet at startup; otherwise falls back to `claude-sonnet-5-5`. | auto |
+| `DEFAULT_MODEL` | Model for requests that name none. When unset: the model the Claude Code CLI recommends (or the newest Sonnet from Anthropic's Models API when `ANTHROPIC_API_KEY` is set); if neither can be discovered, the CLI chooses. | discovered |
 | `CLI_MODEL_DISCOVERY` | Without `ANTHROPIC_API_KEY`, list models and pick the default from the bundled Claude Code CLI. | `true` |
-| `FAST_MODEL` | Speed/cost-optimized model alias. | `claude-haiku-5-5` |
-| `CLAUDE_MODELS_OVERRIDE` | Comma-separated model IDs to advertise via `/v1/models`. Takes precedence over both live and static lists. | - |
-| `MODEL_LIST_CACHE_TTL_SECONDS` | Cache TTL for live `/v1/models` results. | `3600` |
+| `MODEL_LIST_CACHE_TTL_SECONDS` | Cache TTL for the discovered model list. | `3600` |
 | `MODEL_LIST_ERROR_TTL_SECONDS` | Short cache TTL applied when the live fetch fails, so transient outages don't suppress live discovery for the full hour. | `60` |
 | `MODEL_LIST_REQUEST_TIMEOUT_SECONDS` | HTTP timeout for the live model fetch. | `5` |
 
@@ -520,38 +520,23 @@ for chunk in stream:
 
 ## Supported Models
 
-The wrapper lists the models your account can use:
+The wrapper has no built-in model list: models are always discovered from your
+account at runtime.
 
-1. With `ANTHROPIC_API_KEY` set, `/v1/models` returns Anthropic's live list and the
-   latest Sonnet becomes `DEFAULT_MODEL`.
+1. With `ANTHROPIC_API_KEY` set, `/v1/models` returns Anthropic's Models API list and
+   the newest Sonnet becomes the default model.
 2. Otherwise (subscription token, Claude CLI login, Bedrock, Vertex) it asks the
    bundled Claude Code CLI, which reports the account's models and its recommended
    model when the SDK connects; no model call is made. The recommended model is
-   listed first and becomes `DEFAULT_MODEL`. Set `CLI_MODEL_DISCOVERY=false` to
-   skip this.
-3. If neither works, the static list below is served and `claude-sonnet-5-5` is the
-   default.
+   listed first and becomes the default. Set `CLI_MODEL_DISCOVERY=false` to skip
+   this.
+3. If neither source answers, `/v1/models` returns HTTP 503, and requests without a
+   `model` pass `default` to the CLI, which then picks its recommended model.
 
-Both live lists are cached for an hour. `CLAUDE_MODELS_OVERRIDE` advertises a
-fixed list instead.
-
-### Claude 5 Family (Latest)
-- **`claude-fable-5-1`** 🎯 Fable 5.1, most capable
-- `claude-opus-5-5` — Opus 5.5
-- **`claude-sonnet-5-5`** ⭐ Sonnet 5.5, recommended default
-- **`claude-haiku-5-5`** ⚡ Haiku 5.5, fast & cheap
-- `claude-opus-5`, `claude-sonnet-5`
-
-### Claude 4.6 Family
-- `claude-opus-4-6`
-- `claude-sonnet-4-6`
-
-### Claude 4.5 and 4.1
-- `claude-opus-4-5-20250929`, `claude-sonnet-4-5-20250929`, `claude-haiku-4-5-20251001`
-- `claude-opus-4-1-20250805`
-
-The static list is only a fallback; it can include models that are retired for
-your account. The Claude 5 models need `claude-agent-sdk` 0.2.174 or later.
+The list is cached for an hour (`MODEL_LIST_CACHE_TTL_SECONDS`); after a failure it
+is retried after `MODEL_LIST_ERROR_TTL_SECONDS`. Besides the listed ids, the CLI
+accepts its aliases such as `sonnet`, `opus` and `haiku`. `DEFAULT_MODEL` pins the
+model used when a request names none.
 
 **Note:** Claude 3.x models are not supported by the Claude Agent SDK. The model parameter is passed to Claude Code via the SDK's model selection.
 

@@ -16,23 +16,36 @@ from src.models import Message, ChatCompletionRequest
 class TestParameterValidatorValidateModel:
     """Test ParameterValidator.validate_model()"""
 
+    DISCOVERED = {"claude-sonnet-5-5", "claude-opus-5-5", "sonnet"}
+
     def test_valid_model_returns_true(self):
-        """Known supported model returns True."""
-        result = ParameterValidator.validate_model("claude-sonnet-4-5-20250929")
-        assert result is True
+        """A discovered model returns True without a warning."""
+        with patch.object(ParameterValidator, "known_models", self.DISCOVERED):
+            with patch("src.parameter_validator.logger") as mock_logger:
+                assert ParameterValidator.validate_model("claude-sonnet-5-5") is True
+                mock_logger.warning.assert_not_called()
 
     def test_unknown_model_returns_true_with_warning(self):
         """Unknown model returns True (graceful degradation) with warning logged."""
-        with patch("src.parameter_validator.logger") as mock_logger:
-            result = ParameterValidator.validate_model("unknown-model-xyz")
-            assert result is True
-            mock_logger.warning.assert_called_once()
-            assert "unknown-model-xyz" in str(mock_logger.warning.call_args)
+        with patch.object(ParameterValidator, "known_models", self.DISCOVERED):
+            with patch("src.parameter_validator.logger") as mock_logger:
+                result = ParameterValidator.validate_model("unknown-model-xyz")
+                assert result is True
+                mock_logger.warning.assert_called_once()
+                assert "unknown-model-xyz" in str(mock_logger.warning.call_args)
+
+    def test_no_warning_before_discovery(self):
+        """Nothing is flagged until models have been discovered."""
+        with patch.object(ParameterValidator, "known_models", set()):
+            with patch("src.parameter_validator.logger") as mock_logger:
+                assert ParameterValidator.validate_model("anything") is True
+                mock_logger.warning.assert_not_called()
 
     def test_all_known_models_valid(self):
-        """All models in SUPPORTED_MODELS are valid."""
-        for model in ParameterValidator.SUPPORTED_MODELS:
-            assert ParameterValidator.validate_model(model) is True
+        """All discovered models and aliases are valid."""
+        with patch.object(ParameterValidator, "known_models", self.DISCOVERED):
+            for model in self.DISCOVERED:
+                assert ParameterValidator.validate_model(model) is True
 
 
 class TestParameterValidatorValidatePermissionMode:

@@ -19,6 +19,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Tuple
 
+from src.constants import CLI_DEFAULT_MODEL_ALIAS
 from src.models import (
     ChatCompletionRequest,
     ChatCompletionStreamResponse,
@@ -696,7 +697,8 @@ async def stream_tool_completion(
     on_complete: Optional[Callable[[Message], None]] = None,
 ) -> AsyncGenerator[str, None]:
     """Streaming completion as SSE lines: text as it arrives, then any tool calls."""
-    model = request.model
+    # The chat endpoint fills in the model before this runs.
+    model = request.model or CLI_DEFAULT_MODEL_ALIAS
     yield _sse(request_id, model, {"role": "assistant", "content": ""})
 
     for attempt in range(2):

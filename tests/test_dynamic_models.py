@@ -32,7 +32,6 @@ async def test_get_available_models_uses_anthropic_models_api(monkeypatch):
             }
         ]
 
-    monkeypatch.delenv("CLAUDE_MODELS_OVERRIDE", raising=False)
     monkeypatch.setattr(main, "_fetch_anthropic_models", fake_fetch)
 
     models = await main.get_available_models()
@@ -42,34 +41,28 @@ async def test_get_available_models_uses_anthropic_models_api(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_get_available_models_falls_back_to_constants(monkeypatch):
+async def test_get_available_models_empty_when_no_source_answers(monkeypatch):
+    """There is no hardcoded fallback list."""
     main._model_list_cache = {"expires_at": 0.0, "models": None}
 
     async def fake_fetch():
         return None
 
-    monkeypatch.delenv("CLAUDE_MODELS_OVERRIDE", raising=False)
     monkeypatch.setattr(main, "_fetch_anthropic_models", fake_fetch)
 
-    models = await main.get_available_models()
-
-    assert {model["id"] for model in models} >= {"claude-sonnet-4-6", "claude-opus-4-6"}
+    assert await main.get_available_models() == []
 
 
-@pytest.mark.asyncio
-async def test_model_override_skips_live_fetch(monkeypatch):
-    main._model_list_cache = {"expires_at": 0.0, "models": None}
+def test_list_models_endpoint_returns_503_without_models(monkeypatch):
+    from fastapi.testclient import TestClient
 
-    async def fake_fetch():
-        raise AssertionError("override should not call live Anthropic API")
+    async def no_models():
+        return []
 
-    monkeypatch.setenv("CLAUDE_MODELS_OVERRIDE", "custom-a,custom-b")
-    monkeypatch.setattr(main, "CLAUDE_MODELS", ["custom-a", "custom-b"])
-    monkeypatch.setattr(main, "_fetch_anthropic_models", fake_fetch)
+    monkeypatch.setattr(main, "get_available_models", no_models)
+    response = TestClient(main.app).get("/v1/models")
 
-    models = await main.get_available_models()
-
-    assert [model["id"] for model in models] == ["custom-a", "custom-b"]
+    assert response.status_code == 503
 
 
 def test_openai_model_from_anthropic_preserves_metadata():
@@ -93,14 +86,6 @@ def test_openai_model_from_anthropic_preserves_metadata():
     assert model["capabilities"] == {"batch": {"supported": True}}
 
 
-def test_fallback_objects_include_created_field():
-    fallback = main._fallback_model_payload()
-
-    assert fallback, "fallback list should not be empty"
-    for entry in fallback:
-        assert isinstance(entry["created"], int) and entry["created"] > 0
-
-
 @pytest.mark.asyncio
 async def test_concurrent_calls_only_fetch_once(monkeypatch):
     """Lock + double-check should prevent thundering-herd on cache expiry."""
@@ -113,7 +98,6 @@ async def test_concurrent_calls_only_fetch_once(monkeypatch):
         await asyncio.sleep(0.01)
         return [{"id": "claude-test", "object": "model", "owned_by": "anthropic"}]
 
-    monkeypatch.delenv("CLAUDE_MODELS_OVERRIDE", raising=False)
     monkeypatch.setattr(main, "_fetch_anthropic_models", fake_fetch)
 
     results = await asyncio.gather(*[main.get_available_models() for _ in range(8)])
@@ -130,7 +114,6 @@ async def test_failed_fetch_uses_short_error_ttl(monkeypatch):
     async def fake_fetch():
         return None
 
-    monkeypatch.delenv("CLAUDE_MODELS_OVERRIDE", raising=False)
     monkeypatch.setattr(main, "_fetch_anthropic_models", fake_fetch)
     monkeypatch.setattr(main, "MODEL_LIST_CACHE_TTL_SECONDS", 3600)
     monkeypatch.setattr(main, "MODEL_LIST_ERROR_TTL_SECONDS", 60)
@@ -181,7 +164,6 @@ async def test_resolve_default_model_sets_constants(monkeypatch):
             },
         ]
 
-    monkeypatch.delenv("CLAUDE_MODELS_OVERRIDE", raising=False)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
     monkeypatch.setattr(constants, "DEFAULT_MODEL_ENV", None)
     monkeypatch.setattr(main, "_fetch_anthropic_models", fake_fetch)
@@ -193,12 +175,13 @@ async def test_resolve_default_model_sets_constants(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_resolve_default_model_skips_without_api_key(monkeypatch, caplog):
-    """No ANTHROPIC_API_KEY -> skip live discovery, log clearly, use fallback."""
+async def test_resolve_default_model_none_when_nothing_discovered(monkeypatch, caplog):
+    """Nothing discovered -> no default; the CLI chooses at request time."""
+    main._model_list_cache = {"expires_at": 0.0, "models": None}
     constants.RESOLVED_DEFAULT_MODEL = None
 
     async def fake_fetch():
-        raise AssertionError("should not call live API without ANTHROPIC_API_KEY")
+        return None
 
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.setattr(constants, "DEFAULT_MODEL_ENV", None)
@@ -209,7 +192,8 @@ async def test_resolve_default_model_skips_without_api_key(monkeypatch, caplog):
 
     assert resolved is None
     assert constants.RESOLVED_DEFAULT_MODEL is None
-    assert any("Live model discovery disabled" in r.message for r in caplog.records)
+    assert any("No default model could be resolved" in r.message for r in caplog.records)
+    assert await main._model_for_request() == "default"
 
 
 @pytest.mark.asyncio
@@ -296,7 +280,6 @@ async def test_get_available_models_uses_cli_without_api_key(monkeypatch):
     async def cli_entries(*args, **kwargs):
         return CLI_MODEL_ENTRIES
 
-    monkeypatch.delenv("CLAUDE_MODELS_OVERRIDE", raising=False)
     monkeypatch.setattr(main, "_fetch_anthropic_models", no_api_models)
     monkeypatch.setattr(main.claude_cli, "list_models", cli_entries)
 
@@ -335,7 +318,6 @@ async def test_resolve_default_model_uses_cli_default_without_api_key(monkeypatc
         return None
 
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.delenv("CLAUDE_MODELS_OVERRIDE", raising=False)
     monkeypatch.setattr(constants, "DEFAULT_MODEL_ENV", None)
     monkeypatch.setattr(main, "_fetch_anthropic_models", no_api_models)
     monkeypatch.setattr(main, "_fetch_cli_models", cli_models)
@@ -346,3 +328,39 @@ async def test_resolve_default_model_uses_cli_default_without_api_key(monkeypatc
         assert constants.RESOLVED_DEFAULT_MODEL == "claude-sonnet-5-5"
     finally:
         constants.RESOLVED_DEFAULT_MODEL = None
+
+
+@pytest.mark.asyncio
+async def test_request_without_model_uses_resolved_default(monkeypatch):
+    monkeypatch.setattr(constants, "DEFAULT_MODEL_ENV", None)
+    monkeypatch.setattr(constants, "RESOLVED_DEFAULT_MODEL", "claude-sonnet-5-5")
+    assert await main._model_for_request() == "claude-sonnet-5-5"
+
+    monkeypatch.setattr(constants, "DEFAULT_MODEL_ENV", "claude-opus-5-5")
+    assert await main._model_for_request() == "claude-opus-5-5"
+
+
+@pytest.mark.asyncio
+async def test_cli_discovery_records_known_models_and_aliases(monkeypatch):
+    from src.parameter_validator import ParameterValidator
+
+    main._model_list_cache = {"expires_at": 0.0, "models": None}
+
+    async def no_api_models():
+        return None
+
+    async def cli_entries(*args, **kwargs):
+        return CLI_MODEL_ENTRIES
+
+    monkeypatch.setattr(main, "_fetch_anthropic_models", no_api_models)
+    monkeypatch.setattr(main.claude_cli, "list_models", cli_entries)
+    monkeypatch.setattr(ParameterValidator, "known_models", set())
+
+    await main.get_available_models()
+
+    assert {
+        "claude-sonnet-5-5",
+        "sonnet",
+        "opus",
+        "claude-opus-4-8",
+    } <= ParameterValidator.known_models

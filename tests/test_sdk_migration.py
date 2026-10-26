@@ -57,38 +57,21 @@ class TestClaudeAgentOptions:
 class TestConstants:
     """Test that constants are properly defined."""
 
-    def test_claude_models_defined(self):
-        """Test that CLAUDE_MODELS constant exists and has expected models."""
-        from src.constants import CLAUDE_MODELS
+    def test_no_hardcoded_models(self):
+        """Models are discovered at runtime; constants carry no model list or model ids."""
+        from src import constants
 
-        assert isinstance(CLAUDE_MODELS, list)
-        assert len(CLAUDE_MODELS) > 0
-
-        # Check latest fallback models are included
-        for model in (
-            "claude-fable-5-1",
-            "claude-opus-5-5",
-            "claude-sonnet-5-5",
-            "claude-haiku-5-5",
+        for name in (
+            "CLAUDE_MODELS",
+            "DEFAULT_CLAUDE_MODELS",
+            "DEFAULT_MODEL_FALLBACK",
+            "FAST_MODEL",
         ):
-            assert model in CLAUDE_MODELS
-        assert "claude-sonnet-4-6" in CLAUDE_MODELS
-        assert "claude-opus-4-6" in CLAUDE_MODELS
-        assert "claude-haiku-4-5-20251001" in CLAUDE_MODELS
-
-    def test_default_model_defined(self):
-        """Test that DEFAULT_MODEL is set to recommended model."""
-        from src.constants import DEFAULT_MODEL, CLAUDE_MODELS
-
-        assert DEFAULT_MODEL in CLAUDE_MODELS
-        assert DEFAULT_MODEL == "claude-sonnet-5-5"
-
-    def test_fast_model_defined(self):
-        """Test that FAST_MODEL is set to fastest model."""
-        from src.constants import FAST_MODEL, CLAUDE_MODELS
-
-        assert FAST_MODEL in CLAUDE_MODELS
-        assert FAST_MODEL == "claude-haiku-5-5"
+            assert not hasattr(constants, name)
+        assert (
+            constants.RESOLVED_DEFAULT_MODEL is None
+            or constants.RESOLVED_DEFAULT_MODEL.startswith("claude-")
+        )
 
     def test_claude_tools_defined(self):
         """Test that CLAUDE_TOOLS constant exists."""

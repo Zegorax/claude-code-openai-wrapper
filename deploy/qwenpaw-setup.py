@@ -16,27 +16,34 @@ Environment:
 import asyncio
 import json
 import os
+import time
 import urllib.request
 
 from qwenpaw.providers.provider import ModelInfo, ProviderInfo
 from qwenpaw.providers.provider_manager import ProviderManager
 
 PROVIDER_ID = "claude-wrapper"
-FALLBACK_MODEL = "claude-sonnet-5-5"
 
 
-def wrapper_models(base_url: str, api_key: str) -> list:
-    """Model ids from the wrapper's /v1/models, in its order."""
+def wrapper_models(base_url: str, api_key: str, attempts: int = 5) -> list:
+    """Model ids from the wrapper's /v1/models, in its order ([] if unavailable)."""
     request = urllib.request.Request(
         base_url.rstrip("/") + "/models", headers={"Authorization": f"Bearer {api_key}"}
     )
-    try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            data = json.load(response).get("data") or []
-    except Exception as exc:  # noqa: BLE001 - fall back to one known model
-        print(f"Could not read {base_url}/models ({exc}); using {FALLBACK_MODEL}")
-        return [FALLBACK_MODEL]
-    return [m["id"] for m in data if isinstance(m, dict) and m.get("id")] or [FALLBACK_MODEL]
+    for attempt in range(1, attempts + 1):
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                data = json.load(response).get("data") or []
+            models = [m["id"] for m in data if isinstance(m, dict) and m.get("id")]
+            if models:
+                return models
+            error = "empty list"
+        except Exception as exc:  # noqa: BLE001 - retried, then reported
+            error = str(exc)
+        print(f"Could not read {base_url}/models (attempt {attempt}/{attempts}): {error}")
+        if attempt < attempts:
+            time.sleep(10)
+    return []
 
 
 async def main() -> None:
@@ -47,7 +54,13 @@ async def main() -> None:
     models = [m.strip() for m in os.environ.get("CLAUDE_MODELS", "").split(",") if m.strip()]
     if not models:
         models = wrapper_models(base_url, api_key)
-    print(f"Models: {', '.join(models)}")
+    if models:
+        print(f"Models: {', '.join(models)}")
+    else:
+        print(
+            "No models added: the wrapper could not list them. Restart this service or "
+            "sync the provider's models in the QwenPaw Console once the wrapper works."
+        )
 
     manager = ProviderManager.get_instance()
     if manager.get_provider(PROVIDER_ID) is None:

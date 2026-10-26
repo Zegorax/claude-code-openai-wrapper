@@ -8,15 +8,15 @@ logger = logging.getLogger(__name__)
 
 
 # Resolve the default model lazily (avoids circular imports). If the operator
-# set DEFAULT_MODEL via env var, honor it; otherwise prefer the live-resolved
-# latest Sonnet (set at startup by main.resolve_default_model), falling back
-# to the static constant when resolution hasn't happened yet.
-def get_default_model():
+# set DEFAULT_MODEL via env var, honor it; otherwise use the model resolved at
+# runtime (main.resolve_default_model). None means not resolved yet; the chat
+# endpoint resolves it before running the request.
+def get_default_model() -> Optional[str]:
     from src import constants
 
     if constants.DEFAULT_MODEL_ENV:
         return constants.DEFAULT_MODEL_ENV
-    return constants.RESOLVED_DEFAULT_MODEL or constants.DEFAULT_MODEL_FALLBACK
+    return constants.RESOLVED_DEFAULT_MODEL
 
 
 class ImageURL(BaseModel):
@@ -103,7 +103,7 @@ class StreamOptions(BaseModel):
 
 
 class ChatCompletionRequest(BaseModel):
-    model: str = Field(default_factory=get_default_model)
+    model: Optional[str] = Field(default_factory=get_default_model)
     messages: List[Message]
     temperature: Optional[float] = Field(default=1.0, ge=0, le=2)
     top_p: Optional[float] = Field(default=1.0, ge=0, le=1)
