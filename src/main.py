@@ -96,6 +96,12 @@ _model_list_cache: Dict[str, Any] = {"expires_at": 0.0, "models": None}
 # don't all stampede the upstream Anthropic API.
 _model_list_lock = asyncio.Lock()
 
+# Model discovery through the Claude Code CLI, used when no ANTHROPIC_API_KEY
+# is set (for example with subscription auth). The CLI lists the models the
+# account can use, and which one it recommends, without making a model call.
+CLI_MODEL_DISCOVERY = os.getenv("CLI_MODEL_DISCOVERY", "true").lower() in ("true", "1", "yes", "on")
+_cli_default_model: Optional[str] = None
+
 
 def _iso_to_unix(value: Any) -> Optional[int]:
     """Convert an Anthropic ISO-8601 'created_at' string to a unix timestamp."""
@@ -180,6 +186,62 @@ async def _fetch_anthropic_models() -> Optional[List[Dict[str, Any]]]:
     return models or None
 
 
+def _openai_models_from_cli(entries: List[Any]) -> tuple[List[Dict[str, Any]], Optional[str]]:
+    """Convert the CLI's model list to OpenAI model objects plus its default model.
+
+    Aliases ("sonnet", "opus", ...) are listed under the full id they resolve
+    to, each id once. The "default" entry names the recommended model, which
+    is listed first.
+    """
+    now = int(datetime.now(timezone.utc).timestamp())
+    models: List[Dict[str, Any]] = []
+    seen: set = set()
+    default_model: Optional[str] = None
+    for entry in entries:
+        if not isinstance(entry, dict) or entry.get("disabled"):
+            continue
+        model_id = entry.get("resolvedModel") or entry.get("value")
+        if not isinstance(model_id, str) or not model_id.startswith("claude-"):
+            continue
+        if entry.get("value") == "default":
+            default_model = default_model or model_id
+            continue
+        if model_id in seen:
+            continue
+        seen.add(model_id)
+        model: Dict[str, Any] = {
+            "id": model_id,
+            "object": "model",
+            "created": now,
+            "owned_by": "anthropic",
+        }
+        if entry.get("displayName"):
+            model["display_name"] = entry["displayName"]
+        if entry.get("description"):
+            model["description"] = entry["description"]
+        models.append(model)
+    if default_model:
+        recommended = [m for m in models if m["id"] == default_model] or [
+            {"id": default_model, "object": "model", "created": now, "owned_by": "anthropic"}
+        ]
+        models = recommended + [m for m in models if m["id"] != default_model]
+    return models, default_model
+
+
+async def _fetch_cli_models() -> Optional[List[Dict[str, Any]]]:
+    """Fetch the account's models from the Claude Code CLI, or None."""
+    global _cli_default_model
+    if not CLI_MODEL_DISCOVERY:
+        return None
+    entries = await claude_cli.list_models()
+    if not entries:
+        return None
+    models, default_model = _openai_models_from_cli(entries)
+    if default_model:
+        _cli_default_model = default_model
+    return models or None
+
+
 async def get_available_models() -> List[Dict[str, Any]]:
     """Return live Anthropic models when possible, with cached static fallback."""
     if os.getenv("CLAUDE_MODELS_OVERRIDE", "").strip():
@@ -198,7 +260,7 @@ async def get_available_models() -> List[Dict[str, Any]]:
         if cached_models and now < float(_model_list_cache.get("expires_at", 0)):
             return cached_models
 
-        live_models = await _fetch_anthropic_models()
+        live_models = await _fetch_anthropic_models() or await _fetch_cli_models()
         if live_models:
             _model_list_cache.update(
                 {"models": live_models, "expires_at": now + MODEL_LIST_CACHE_TTL_SECONDS}
@@ -242,6 +304,15 @@ async def resolve_default_model() -> Optional[str]:
         return constants.DEFAULT_MODEL_ENV
 
     if not os.getenv("ANTHROPIC_API_KEY"):
+        # Without an API key, use the model the Claude Code CLI recommends.
+        try:
+            await get_available_models()
+        except Exception as exc:  # noqa: BLE001 - startup should never abort on this
+            logger.warning("Could not list models from the Claude Code CLI: %s", exc)
+        if _cli_default_model:
+            constants.RESOLVED_DEFAULT_MODEL = _cli_default_model
+            logger.info("Resolved default model from the Claude Code CLI: %s", _cli_default_model)
+            return _cli_default_model
         logger.info(
             "Live model discovery disabled (no ANTHROPIC_API_KEY); " "using fallback default %s",
             DEFAULT_MODEL_FALLBACK,

@@ -54,12 +54,17 @@ services:
     environment:
       WRAPPER_BASE_URL: http://claude-wrapper:8000/v1
       WRAPPER_API_KEY: ${API_KEY:-}
-      CLAUDE_MODELS: ${CLAUDE_MODELS:-claude-sonnet-5-5,claude-opus-5-5,claude-fable-5-1,claude-haiku-5-5}
+      # Empty: every model the wrapper lists (the account's models, read from
+      # the Claude Code CLI), recommended model first.
+      CLAUDE_MODELS: ${CLAUDE_MODELS:-}
     volumes:
       - ./deploy/qwenpaw-setup.py:/setup/qwenpaw-setup.py:ro
       - qwenpaw-data:/app/working
       - qwenpaw-secrets:/app/working.secret
       - qwenpaw-backups:/app/working.backups
+    depends_on:
+      claude-wrapper:
+        condition: service_healthy
     restart: "no"
 
   qwenpaw:

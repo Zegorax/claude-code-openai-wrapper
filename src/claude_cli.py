@@ -1,3 +1,4 @@
+import asyncio
 import os
 import tempfile
 import atexit
@@ -6,7 +7,7 @@ from typing import AsyncGenerator, Dict, Any, Optional, List
 from pathlib import Path
 import logging
 
-from claude_agent_sdk import query, ClaudeAgentOptions
+from claude_agent_sdk import query, ClaudeAgentOptions, ClaudeSDKClient
 
 logger = logging.getLogger(__name__)
 
@@ -225,6 +226,38 @@ class ClaudeCodeCLI:
                     os.unlink(system_prompt_file)
                 except OSError:
                     pass
+
+    async def list_models(self, timeout: float = 30.0) -> Optional[List[Dict[str, Any]]]:
+        """Return the models the CLI offers for the current account, or None.
+
+        The CLI reports them in its reply to the SDK's initialize request, so
+        this starts the CLI and stops it again without making a model call.
+        Each entry has "value" (what the CLI accepts, possibly an alias such
+        as "sonnet"), "resolvedModel", "displayName" and "description".
+        """
+        original_env = {}
+        try:
+            for key, value in self.claude_env_vars.items():
+                original_env[key] = os.environ.get(key)
+                os.environ[key] = value
+
+            async def fetch() -> Optional[List[Dict[str, Any]]]:
+                options = ClaudeAgentOptions(tools=[], max_turns=1, cwd=self.cwd)
+                async with ClaudeSDKClient(options=options) as client:
+                    info = await client.get_server_info() or {}
+                models = info.get("models")
+                return models if isinstance(models, list) else None
+
+            return await asyncio.wait_for(fetch(), timeout=timeout)
+        except Exception as e:
+            logger.warning(f"Could not list models from the Claude Code CLI: {e}")
+            return None
+        finally:
+            for key, original_value in original_env.items():
+                if original_value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = original_value
 
     def parse_claude_message(self, messages: List[Dict[str, Any]]) -> Optional[str]:
         """Extract the assistant message from Claude Agent SDK messages.

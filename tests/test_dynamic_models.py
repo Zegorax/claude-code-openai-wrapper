@@ -7,6 +7,17 @@ import pytest
 from src import constants, main
 
 
+@pytest.fixture(autouse=True)
+def no_cli_model_discovery(monkeypatch):
+    """Keep tests from starting a real Claude Code CLI; tests opt in by patching."""
+
+    async def no_cli_models(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(main.claude_cli, "list_models", no_cli_models)
+    monkeypatch.setattr(main, "_cli_default_model", None)
+
+
 @pytest.mark.asyncio
 async def test_get_available_models_uses_anthropic_models_api(monkeypatch):
     main._model_list_cache = {"expires_at": 0.0, "models": None}
@@ -234,3 +245,104 @@ def test_get_default_model_env_override_wins(monkeypatch):
     monkeypatch.setattr(constants, "RESOLVED_DEFAULT_MODEL", "claude-sonnet-future")
 
     assert models_module.get_default_model() == "claude-opus-4-6"
+
+
+CLI_MODEL_ENTRIES = [
+    {"value": "default", "resolvedModel": "claude-sonnet-5-5", "displayName": "Default"},
+    {"value": "opus", "resolvedModel": "claude-opus-5-5", "displayName": "Opus 5.5"},
+    {"value": "sonnet", "resolvedModel": "claude-sonnet-5-5", "displayName": "Sonnet 5.5"},
+    {"value": "haiku", "resolvedModel": "claude-haiku-5-5", "displayName": "Haiku 5.5"},
+    {"value": "claude-opus-4-8", "resolvedModel": "claude-opus-4-8", "displayName": "Opus 4.8"},
+    {"value": "claude-sonnet-4-6", "displayName": "Sonnet 4.6", "description": "Older"},
+    {"value": "claude-hidden-1", "displayName": "Hidden", "disabled": True},
+    {"value": "not-a-claude-id", "displayName": "Odd"},
+]
+
+
+def test_openai_models_from_cli():
+    models, default_model = main._openai_models_from_cli(CLI_MODEL_ENTRIES)
+
+    assert default_model == "claude-sonnet-5-5"
+    # The recommended (default) model comes first.
+    assert [m["id"] for m in models] == [
+        "claude-sonnet-5-5",
+        "claude-opus-5-5",
+        "claude-haiku-5-5",
+        "claude-opus-4-8",
+        "claude-sonnet-4-6",
+    ]
+    sonnet = models[0]
+    assert sonnet["display_name"] == "Sonnet 5.5"
+    assert sonnet["object"] == "model" and sonnet["owned_by"] == "anthropic"
+    assert isinstance(sonnet["created"], int)
+    assert models[-1]["description"] == "Older"
+
+
+def test_openai_models_from_cli_adds_unlisted_default():
+    models, default_model = main._openai_models_from_cli(
+        [{"value": "default", "resolvedModel": "claude-new-1"}, {"value": "claude-x-1"}]
+    )
+    assert default_model == "claude-new-1"
+    assert [m["id"] for m in models] == ["claude-new-1", "claude-x-1"]
+
+
+@pytest.mark.asyncio
+async def test_get_available_models_uses_cli_without_api_key(monkeypatch):
+    main._model_list_cache = {"expires_at": 0.0, "models": None}
+
+    async def no_api_models():
+        return None
+
+    async def cli_entries(*args, **kwargs):
+        return CLI_MODEL_ENTRIES
+
+    monkeypatch.delenv("CLAUDE_MODELS_OVERRIDE", raising=False)
+    monkeypatch.setattr(main, "_fetch_anthropic_models", no_api_models)
+    monkeypatch.setattr(main.claude_cli, "list_models", cli_entries)
+
+    models = await main.get_available_models()
+
+    assert models[0]["id"] == "claude-sonnet-5-5"
+    assert "claude-opus-4-8" in {m["id"] for m in models}
+    assert main._cli_default_model == "claude-sonnet-5-5"
+    # A successful listing is cached like a live one.
+    assert main._model_list_cache["expires_at"] > main.time.time() + 60
+
+
+@pytest.mark.asyncio
+async def test_cli_discovery_can_be_disabled(monkeypatch):
+    async def must_not_run(*args, **kwargs):
+        raise AssertionError("CLI discovery is disabled")
+
+    monkeypatch.setattr(main, "CLI_MODEL_DISCOVERY", False)
+    monkeypatch.setattr(main.claude_cli, "list_models", must_not_run)
+
+    assert await main._fetch_cli_models() is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_default_model_uses_cli_default_without_api_key(monkeypatch):
+    main._model_list_cache = {"expires_at": 0.0, "models": None}
+    constants.RESOLVED_DEFAULT_MODEL = None
+
+    async def cli_models():
+        main._cli_default_model = "claude-sonnet-5-5"
+        return [
+            {"id": "claude-sonnet-5-5", "object": "model", "created": 0, "owned_by": "anthropic"}
+        ]
+
+    async def no_api_models():
+        return None
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("CLAUDE_MODELS_OVERRIDE", raising=False)
+    monkeypatch.setattr(constants, "DEFAULT_MODEL_ENV", None)
+    monkeypatch.setattr(main, "_fetch_anthropic_models", no_api_models)
+    monkeypatch.setattr(main, "_fetch_cli_models", cli_models)
+
+    try:
+        resolved = await main.resolve_default_model()
+        assert resolved == "claude-sonnet-5-5"
+        assert constants.RESOLVED_DEFAULT_MODEL == "claude-sonnet-5-5"
+    finally:
+        constants.RESOLVED_DEFAULT_MODEL = None
