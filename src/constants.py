@@ -72,11 +72,18 @@ DEFAULT_DISALLOWED_TOOLS = [
 # NOTE: Claude Agent SDK only supports Claude 4+ models, not Claude 3.x.
 #
 # Operators can override the advertised model list without rebuilding the image:
-#   CLAUDE_MODELS_OVERRIDE=claude-sonnet-4-6,claude-opus-4-6
+#   CLAUDE_MODELS_OVERRIDE=claude-sonnet-5-5,claude-opus-5-5
 DEFAULT_CLAUDE_MODELS = [
-    # Claude 4.6 Family (Latest) - RECOMMENDED
-    "claude-opus-4-6",  # Most capable
-    "claude-sonnet-4-6",  # Recommended - best coding model
+    # Claude 5 Family (Latest) - RECOMMENDED
+    "claude-fable-5-1",  # Fable 5.1 - most capable
+    "claude-opus-5-5",  # Opus 5.5
+    "claude-sonnet-5-5",  # Sonnet 5.5 - recommended default
+    "claude-haiku-5-5",  # Haiku 5.5 - fast and cheap
+    "claude-opus-5",  # Opus 5
+    "claude-sonnet-5",  # Sonnet 5
+    # Claude 4.6 Family
+    "claude-opus-4-6",
+    "claude-sonnet-4-6",
     # Claude 4.5 Family (Fall 2025)
     "claude-opus-4-5-20250929",  # Opus 4.5 - deep reasoning and coding
     "claude-sonnet-4-5-20250929",  # Sonnet 4.5 - agents and coding
@@ -98,13 +105,13 @@ CLAUDE_MODELS = (
 # stores it in RESOLVED_DEFAULT_MODEL. DEFAULT_MODEL_FALLBACK is used until/if
 # that resolution succeeds.
 DEFAULT_MODEL_ENV: Optional[str] = os.getenv("DEFAULT_MODEL")
-DEFAULT_MODEL_FALLBACK = "claude-sonnet-4-6"
+DEFAULT_MODEL_FALLBACK = "claude-sonnet-5-5"
 DEFAULT_MODEL = DEFAULT_MODEL_ENV or DEFAULT_MODEL_FALLBACK
 RESOLVED_DEFAULT_MODEL: Optional[str] = None
 
 # Fast model (for speed/cost optimization)
 # Can be overridden via FAST_MODEL environment variable
-FAST_MODEL = os.getenv("FAST_MODEL", "claude-haiku-4-5-20251001")
+FAST_MODEL = os.getenv("FAST_MODEL", "claude-haiku-5-5")
 
 # Anthropic Models API configuration for dynamically refreshing /v1/models
 ANTHROPIC_MODELS_URL = os.getenv("ANTHROPIC_MODELS_URL", "https://api.anthropic.com/v1/models")

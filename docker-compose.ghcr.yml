@@ -54,7 +54,7 @@ services:
     environment:
       WRAPPER_BASE_URL: http://claude-wrapper:8000/v1
       WRAPPER_API_KEY: ${API_KEY:-}
-      CLAUDE_MODELS: ${CLAUDE_MODELS:-claude-sonnet-4-6,claude-opus-4-6}
+      CLAUDE_MODELS: ${CLAUDE_MODELS:-claude-sonnet-5-5,claude-opus-5-5,claude-fable-5-1,claude-haiku-5-5}
     volumes:
       - ./deploy/qwenpaw-setup.py:/setup/qwenpaw-setup.py:ro
       - qwenpaw-data:/app/working

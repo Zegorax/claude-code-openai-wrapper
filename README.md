@@ -6,7 +6,7 @@ An OpenAI API-compatible wrapper for Claude Code, allowing you to use Claude Cod
 
 **Current Version:** 2.3.0
 - **Live `/v1/models` discovery:** When `ANTHROPIC_API_KEY` is set, the wrapper fetches Anthropic's live model list (cached) instead of serving the static fallback
-- **Dynamic default Sonnet:** `DEFAULT_MODEL` resolves to the latest Sonnet at startup when `ANTHROPIC_API_KEY` is configured; falls back to `claude-sonnet-4-6` otherwise
+- **Dynamic default Sonnet:** `DEFAULT_MODEL` resolves to the latest Sonnet at startup when `ANTHROPIC_API_KEY` is configured; falls back to `claude-sonnet-5-5` otherwise
 - **Operator overrides:** New `CLAUDE_MODELS_OVERRIDE`, `FAST_MODEL`, and `MODEL_LIST_*` env vars
 - **Updated catalog:** Claude 4.6 family added to the static fallback list
 
@@ -334,7 +334,7 @@ docker compose -f docker-compose.ghcr.yml up -d
 
 - A one-shot `qwenpaw-setup` container (`deploy/qwenpaw-setup.py`) registers the
   wrapper as QwenPaw's provider (`http://claude-wrapper:8000/v1`), adds the models
-  in `CLAUDE_MODELS` (default `claude-sonnet-4-6,claude-opus-4-6`) and makes the
+  in `CLAUDE_MODELS` (default: the Claude 5 models, Sonnet 5.5 first) and makes the
   first one active if no model is active yet. It runs on every start and leaves a
   model chosen later in the Console alone.
 - Both ports are bound to localhost. Set `API_KEY` to protect the wrapper (the setup
@@ -411,7 +411,7 @@ Run: `docker-compose up -d` | Stop: `docker-compose down`
 | `CLAUDE_AUTH_METHOD` | Auth method: `cli`, `api_key`, `bedrock`, `vertex` | auto-detect |
 | `ANTHROPIC_API_KEY` | Direct Anthropic API key. Optional — also unlocks live `/v1/models` discovery and dynamic latest-Sonnet default. Not required when using Bedrock, Vertex, or Claude CLI subscription auth. | - |
 | `API_KEYS` | Comma-separated client API keys | - |
-| `DEFAULT_MODEL` | Override the default model. When unset and `ANTHROPIC_API_KEY` is configured, the wrapper resolves the latest Sonnet at startup; otherwise falls back to `claude-sonnet-4-6`. | auto |
+| `DEFAULT_MODEL` | Override the default model. When unset and `ANTHROPIC_API_KEY` is configured, the wrapper resolves the latest Sonnet at startup; otherwise falls back to `claude-sonnet-5-5`. | auto |
 | `FAST_MODEL` | Speed/cost-optimized model alias. | `claude-haiku-4-5-20251001` |
 | `CLAUDE_MODELS_OVERRIDE` | Comma-separated model IDs to advertise via `/v1/models`. Takes precedence over both live and static lists. | - |
 | `MODEL_LIST_CACHE_TTL_SECONDS` | Cache TTL for live `/v1/models` results. | `3600` |
@@ -443,7 +443,7 @@ curl http://localhost:8000/v1/models
 curl -X POST http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "claude-sonnet-4-6",
+    "model": "claude-sonnet-5-5",
     "messages": [
       {"role": "user", "content": "What is 2 + 2?"}
     ]
@@ -454,7 +454,7 @@ curl -X POST http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer your-generated-api-key" \
   -d '{
-    "model": "claude-sonnet-4-6",
+    "model": "claude-sonnet-5-5",
     "messages": [
       {"role": "user", "content": "Write a Python hello world script"}
     ],
@@ -478,7 +478,7 @@ client = OpenAI(
 
 # Basic chat completion
 response = client.chat.completions.create(
-    model="claude-sonnet-4-6",
+    model="claude-sonnet-5-5",
     messages=[
         {"role": "system", "content": "You are a helpful assistant."},
         {"role": "user", "content": "What files are in the current directory?"}
@@ -490,7 +490,7 @@ print(response.choices[0].message.content)
 
 # Enable tools when you need them (e.g., to read files)
 response = client.chat.completions.create(
-    model="claude-sonnet-4-6",
+    model="claude-sonnet-5-5",
     messages=[
         {"role": "user", "content": "What files are in the current directory?"}
     ],
@@ -505,7 +505,7 @@ print(f"Tokens: {response.usage.total_tokens} ({response.usage.prompt_tokens} + 
 
 # Streaming
 stream = client.chat.completions.create(
-    model="claude-sonnet-4-6",
+    model="claude-sonnet-5-5",
     messages=[
         {"role": "user", "content": "Explain quantum computing"}
     ],
@@ -519,19 +519,27 @@ for chunk in stream:
 
 ## Supported Models
 
-The wrapper exposes Claude's full model catalog. When `ANTHROPIC_API_KEY` is set, `/v1/models` returns Anthropic's live list (cached for 1 hour) and the wrapper picks the latest Sonnet as `DEFAULT_MODEL` at startup. When the key is absent — for example, when running with Bedrock, Vertex, or Claude CLI subscription auth — the static list below is served and `claude-sonnet-4-6` is used as the fallback default. Operators who want a curated list regardless of auth can set `CLAUDE_MODELS_OVERRIDE`.
+The wrapper exposes Claude's full model catalog. When `ANTHROPIC_API_KEY` is set, `/v1/models` returns Anthropic's live list (cached for 1 hour) and the wrapper picks the latest Sonnet as `DEFAULT_MODEL` at startup. When the key is absent — for example, when running with Bedrock, Vertex, or Claude CLI subscription auth — the static list below is served and `claude-sonnet-5-5` is used as the fallback default. Operators who want a curated list regardless of auth can set `CLAUDE_MODELS_OVERRIDE`.
 
-### Claude 4.6 Family (Latest)
-- **`claude-opus-4-6`** 🎯 Most capable
-- **`claude-sonnet-4-6`** ⭐ Recommended — best coding model
+### Claude 5 Family (Latest)
+- **`claude-fable-5-1`** 🎯 Fable 5.1, most capable
+- `claude-opus-5-5` — Opus 5.5
+- **`claude-sonnet-5-5`** ⭐ Sonnet 5.5, recommended default
+- **`claude-haiku-5-5`** ⚡ Haiku 5.5, fast & cheap
+- `claude-opus-5`, `claude-sonnet-5`
 
-### Claude 4.5 Family (Fall 2025)
-- `claude-opus-4-5-20250929` — deep reasoning and coding
-- `claude-sonnet-4-5-20250929` — agents and coding
-- **`claude-haiku-4-5-20251001`** ⚡ Fast & cheap
+### Claude 4.6 Family
+- `claude-opus-4-6`
+- `claude-sonnet-4-6`
 
-### Claude 4.1 Family
-- `claude-opus-4-1-20250805` — upgraded Opus 4
+### Claude 4.5 and 4.1
+- `claude-opus-4-5-20250929`, `claude-sonnet-4-5-20250929`, `claude-haiku-4-5-20251001`
+- `claude-opus-4-1-20250805`
+
+Which models work depends on your account and on the bundled Claude Code CLI;
+the Claude 5 models need `claude-agent-sdk` 0.2.174 or later. Older models may be
+retired for your account; use `CLAUDE_MODELS_OVERRIDE` to advertise exactly the
+models you want.
 
 **Note:** Claude 3.x models are not supported by the Claude Agent SDK. The model parameter is passed to Claude Code via the SDK's model selection.
 
@@ -556,7 +564,7 @@ client = openai.OpenAI(
 
 # Start a conversation with session continuity
 response1 = client.chat.completions.create(
-    model="claude-sonnet-4-6",
+    model="claude-sonnet-5-5",
     messages=[
         {"role": "user", "content": "Hello! My name is Alice and I'm learning Python."}
     ],
@@ -565,7 +573,7 @@ response1 = client.chat.completions.create(
 
 # Continue the conversation - Claude remembers the context
 response2 = client.chat.completions.create(
-    model="claude-sonnet-4-6",
+    model="claude-sonnet-5-5",
     messages=[
         {"role": "user", "content": "What's my name and what am I learning?"}
     ],
@@ -581,7 +589,7 @@ response2 = client.chat.completions.create(
 curl -X POST http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "claude-sonnet-4-6",
+    "model": "claude-sonnet-5-5",
     "messages": [{"role": "user", "content": "My favourite color is blue."}],
     "session_id": "my-session"
   }'
@@ -590,7 +598,7 @@ curl -X POST http://localhost:8000/v1/chat/completions \
 curl -X POST http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "claude-sonnet-4-6",
+    "model": "claude-sonnet-5-5",
     "messages": [{"role": "user", "content": "What's my favourite color?"}],
     "session_id": "my-session"
   }'
@@ -698,7 +706,7 @@ roughly 10-25k input tokens to every request.
 2. In QwenPaw Console → Settings → Models, add a custom OpenAI-compatible provider
    with base URL `http://127.0.0.1:8000/v1` and any API key (or the wrapper's
    `API_KEY` if protection is on).
-3. Add a model id listed by `GET /v1/models`, for example `claude-sonnet-4-6`.
+3. Add a model id listed by `GET /v1/models`, for example `claude-sonnet-5-5`.
 4. Make it the active model. QwenPaw 2.2.1 has no per-model tool-calling flag to
    set; it sends its tools to the active model on every step.
 

@@ -65,6 +65,13 @@ class TestConstants:
         assert len(CLAUDE_MODELS) > 0
 
         # Check latest fallback models are included
+        for model in (
+            "claude-fable-5-1",
+            "claude-opus-5-5",
+            "claude-sonnet-5-5",
+            "claude-haiku-5-5",
+        ):
+            assert model in CLAUDE_MODELS
         assert "claude-sonnet-4-6" in CLAUDE_MODELS
         assert "claude-opus-4-6" in CLAUDE_MODELS
         assert "claude-haiku-4-5-20251001" in CLAUDE_MODELS
@@ -74,14 +81,14 @@ class TestConstants:
         from src.constants import DEFAULT_MODEL, CLAUDE_MODELS
 
         assert DEFAULT_MODEL in CLAUDE_MODELS
-        assert DEFAULT_MODEL == "claude-sonnet-4-6"
+        assert DEFAULT_MODEL == "claude-sonnet-5-5"
 
     def test_fast_model_defined(self):
         """Test that FAST_MODEL is set to fastest model."""
         from src.constants import FAST_MODEL, CLAUDE_MODELS
 
         assert FAST_MODEL in CLAUDE_MODELS
-        assert FAST_MODEL == "claude-haiku-4-5-20251001"
+        assert FAST_MODEL == "claude-haiku-5-5"
 
     def test_claude_tools_defined(self):
         """Test that CLAUDE_TOOLS constant exists."""

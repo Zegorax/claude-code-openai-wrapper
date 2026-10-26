@@ -25,7 +25,7 @@ async def main() -> None:
     # QwenPaw requires a key for custom providers; the wrapper ignores it
     # unless its own API_KEY is set.
     api_key = os.environ.get("WRAPPER_API_KEY") or "not-used"
-    models = [m.strip() for m in os.environ.get("CLAUDE_MODELS", "claude-sonnet-4-6").split(",")]
+    models = [m.strip() for m in os.environ.get("CLAUDE_MODELS", "claude-sonnet-5-5").split(",")]
     models = [m for m in models if m]
 
     manager = ProviderManager.get_instance()
