@@ -593,6 +593,38 @@ class TestClaudeCodeCLIRunCompletion:
         assert captured_options[1].include_partial_messages is False
 
     @pytest.mark.asyncio
+    async def test_list_models_reads_initialize_response(self, cli_instance):
+        """list_models returns the models from the CLI's initialize response."""
+        models = [{"value": "sonnet", "resolvedModel": "claude-sonnet-5-5"}]
+        captured = {}
+
+        class FakeClient:
+            def __init__(self, options):
+                captured["options"] = options
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def get_server_info(self):
+                return {"models": models, "commands": []}
+
+        with patch("src.claude_cli.ClaudeSDKClient", FakeClient):
+            assert await cli_instance.list_models() == models
+        assert captured["options"].tools == []
+
+    @pytest.mark.asyncio
+    async def test_list_models_returns_none_on_error(self, cli_instance):
+        class FailingClient:
+            def __init__(self, options):
+                raise RuntimeError("CLI not found")
+
+        with patch("src.claude_cli.ClaudeSDKClient", FailingClient):
+            assert await cli_instance.list_models() is None
+
+    @pytest.mark.asyncio
     async def test_run_completion_tools_option(self, cli_instance):
         """tools=[] is forwarded so the CLI offers no built-in tools."""
         captured_options = []

@@ -60,10 +60,9 @@ from src import constants
 from src.constants import (
     ANTHROPIC_MODELS_URL,
     ANTHROPIC_VERSION,
-    CLAUDE_MODELS,
     CLAUDE_TOOLS,
+    CLI_DEFAULT_MODEL_ALIAS,
     DEFAULT_ALLOWED_TOOLS,
-    DEFAULT_MODEL_FALLBACK,
     MODEL_LIST_CACHE_TTL_SECONDS,
     MODEL_LIST_ERROR_TTL_SECONDS,
     MODEL_LIST_REQUEST_TIMEOUT_SECONDS,
@@ -91,10 +90,16 @@ runtime_api_key = None
 # Best-effort cache for Anthropic's live Models API.  The static constants remain
 # the fallback so /v1/models keeps working for Claude CLI, Bedrock, Vertex, local
 # development, and transient Anthropic API outages.
-_model_list_cache: Dict[str, Any] = {"expires_at": 0.0, "models": None}
+_model_list_cache: Dict[str, Any] = {"expires_at": 0.0, "models": None, "source": None}
 # Serializes cache refreshes so concurrent /v1/models requests at TTL expiry
 # don't all stampede the upstream Anthropic API.
 _model_list_lock = asyncio.Lock()
+
+# Model discovery through the Claude Code CLI, used when no ANTHROPIC_API_KEY
+# is set (for example with subscription auth). The CLI lists the models the
+# account can use, and which one it recommends, without making a model call.
+CLI_MODEL_DISCOVERY = os.getenv("CLI_MODEL_DISCOVERY", "true").lower() in ("true", "1", "yes", "on")
+_cli_default_model: Optional[str] = None
 
 
 def _iso_to_unix(value: Any) -> Optional[int]:
@@ -131,14 +136,6 @@ def _openai_model_from_anthropic(model_info: Dict[str, Any]) -> Dict[str, Any]:
             model[key] = model_info[key]
 
     return model
-
-
-def _fallback_model_payload() -> List[Dict[str, Any]]:
-    now = int(datetime.now(timezone.utc).timestamp())
-    return [
-        {"id": model_id, "object": "model", "created": now, "owned_by": "anthropic"}
-        for model_id in CLAUDE_MODELS
-    ]
 
 
 async def _fetch_anthropic_models() -> Optional[List[Dict[str, Any]]]:
@@ -180,14 +177,77 @@ async def _fetch_anthropic_models() -> Optional[List[Dict[str, Any]]]:
     return models or None
 
 
-async def get_available_models() -> List[Dict[str, Any]]:
-    """Return live Anthropic models when possible, with cached static fallback."""
-    if os.getenv("CLAUDE_MODELS_OVERRIDE", "").strip():
-        return _fallback_model_payload()
+def _openai_models_from_cli(entries: List[Any]) -> tuple[List[Dict[str, Any]], Optional[str]]:
+    """Convert the CLI's model list to OpenAI model objects plus its default model.
 
+    Aliases ("sonnet", "opus", ...) are listed under the full id they resolve
+    to, each id once. The "default" entry names the recommended model, which
+    is listed first.
+    """
+    now = int(datetime.now(timezone.utc).timestamp())
+    models: List[Dict[str, Any]] = []
+    seen: set = set()
+    default_model: Optional[str] = None
+    for entry in entries:
+        if not isinstance(entry, dict) or entry.get("disabled"):
+            continue
+        model_id = entry.get("resolvedModel") or entry.get("value")
+        if not isinstance(model_id, str) or not model_id.startswith("claude-"):
+            continue
+        if entry.get("value") == "default":
+            default_model = default_model or model_id
+            continue
+        if model_id in seen:
+            continue
+        seen.add(model_id)
+        model: Dict[str, Any] = {
+            "id": model_id,
+            "object": "model",
+            "created": now,
+            "owned_by": "anthropic",
+        }
+        if entry.get("displayName"):
+            model["display_name"] = entry["displayName"]
+        if entry.get("description"):
+            model["description"] = entry["description"]
+        models.append(model)
+    if default_model:
+        recommended = [m for m in models if m["id"] == default_model] or [
+            {"id": default_model, "object": "model", "created": now, "owned_by": "anthropic"}
+        ]
+        models = recommended + [m for m in models if m["id"] != default_model]
+    return models, default_model
+
+
+async def _fetch_cli_models() -> Optional[List[Dict[str, Any]]]:
+    """Fetch the account's models from the Claude Code CLI, or None."""
+    global _cli_default_model
+    if not CLI_MODEL_DISCOVERY:
+        return None
+    entries = await claude_cli.list_models()
+    if not entries:
+        return None
+    models, default_model = _openai_models_from_cli(entries)
+    if default_model:
+        _cli_default_model = default_model
+    # The CLI also accepts its aliases ("sonnet", "opus", ...) as model names.
+    aliases = {
+        e["value"] for e in entries if isinstance(e, dict) and isinstance(e.get("value"), str)
+    }
+    ParameterValidator.known_models = {m["id"] for m in models} | aliases
+    return models or None
+
+
+async def get_available_models() -> List[Dict[str, Any]]:
+    """Return the account's models, from Anthropic's Models API or the Claude Code CLI.
+
+    Results are cached for MODEL_LIST_CACHE_TTL_SECONDS. When neither source
+    answers, an empty list is returned (and cached briefly); there is no
+    hardcoded fallback list.
+    """
     now = time.time()
     cached_models = _model_list_cache.get("models")
-    if cached_models and now < float(_model_list_cache.get("expires_at", 0)):
+    if cached_models is not None and now < float(_model_list_cache.get("expires_at", 0)):
         return cached_models
 
     async with _model_list_lock:
@@ -195,23 +255,34 @@ async def get_available_models() -> List[Dict[str, Any]]:
         # subsequent waiters return without re-fetching.
         now = time.time()
         cached_models = _model_list_cache.get("models")
-        if cached_models and now < float(_model_list_cache.get("expires_at", 0)):
+        if cached_models is not None and now < float(_model_list_cache.get("expires_at", 0)):
             return cached_models
 
-        live_models = await _fetch_anthropic_models()
-        if live_models:
+        source = "anthropic"
+        models = await _fetch_anthropic_models()
+        if not models:
+            source = "cli"
+            models = await _fetch_cli_models()
+        if models:
+            if source == "anthropic":
+                ParameterValidator.known_models = {m["id"] for m in models}
             _model_list_cache.update(
-                {"models": live_models, "expires_at": now + MODEL_LIST_CACHE_TTL_SECONDS}
+                {
+                    "models": models,
+                    "source": source,
+                    "expires_at": now + MODEL_LIST_CACHE_TTL_SECONDS,
+                }
             )
-            return live_models
+            return models
 
-        fallback_models = _fallback_model_payload()
-        # Use a short TTL on failure so transient outages don't suppress live
-        # discovery for the full MODEL_LIST_CACHE_TTL_SECONDS window.
-        _model_list_cache.update(
-            {"models": fallback_models, "expires_at": now + MODEL_LIST_ERROR_TTL_SECONDS}
+        logger.warning(
+            "Could not retrieve the model list from Anthropic's Models API or the Claude Code CLI"
         )
-        return fallback_models
+        # Short TTL so a transient failure is retried soon.
+        _model_list_cache.update(
+            {"models": [], "source": None, "expires_at": now + MODEL_LIST_ERROR_TTL_SECONDS}
+        )
+        return []
 
 
 def _pick_latest_sonnet(models: List[Dict[str, Any]]) -> Optional[str]:
@@ -231,40 +302,44 @@ def _pick_latest_sonnet(models: List[Dict[str, Any]]) -> Optional[str]:
 
 
 async def resolve_default_model() -> Optional[str]:
-    """Pick the latest Sonnet from /v1/models and store it as the default.
+    """Resolve the default model from the discovered models and store it.
 
-    Skipped when the operator pinned DEFAULT_MODEL via env var, or when no
-    ANTHROPIC_API_KEY is configured (live discovery is the only auth-aware
-    path; Bedrock, Vertex, and Claude CLI subscription users get the static
-    DEFAULT_MODEL_FALLBACK).
+    With the Claude Code CLI as the source, that is the model the CLI
+    recommends; with Anthropic's Models API, the newest Sonnet. Skipped when
+    the operator pinned DEFAULT_MODEL. Returns None when nothing could be
+    discovered.
     """
     if constants.DEFAULT_MODEL_ENV:
         return constants.DEFAULT_MODEL_ENV
 
-    if not os.getenv("ANTHROPIC_API_KEY"):
-        logger.info(
-            "Live model discovery disabled (no ANTHROPIC_API_KEY); " "using fallback default %s",
-            DEFAULT_MODEL_FALLBACK,
-        )
-        return None
-
     try:
         models = await get_available_models()
     except Exception as exc:  # noqa: BLE001 - startup should never abort on this
-        logger.warning("Could not resolve default model from /v1/models: %s", exc)
+        logger.warning("Could not resolve the default model: %s", exc)
         return None
 
-    latest = _pick_latest_sonnet(models)
-    if latest:
-        constants.RESOLVED_DEFAULT_MODEL = latest
-        logger.info("Resolved default model from Anthropic Models API: %s", latest)
-        return latest
+    if _model_list_cache.get("source") == "cli":
+        default_model = _cli_default_model
+        origin = "the Claude Code CLI"
+    else:
+        default_model = _pick_latest_sonnet(models)
+        origin = "Anthropic Models API"
+    if default_model:
+        constants.RESOLVED_DEFAULT_MODEL = default_model
+        logger.info("Resolved default model from %s: %s", origin, default_model)
+        return default_model
 
-    logger.info(
-        "No Sonnet model found in /v1/models response; using fallback %s",
-        DEFAULT_MODEL_FALLBACK,
-    )
+    logger.info("No default model could be resolved; the Claude Code CLI will choose")
     return None
+
+
+async def _model_for_request() -> str:
+    """Model for a request that names none: the resolved default, else the CLI's choice."""
+    if constants.DEFAULT_MODEL_ENV:
+        return constants.DEFAULT_MODEL_ENV
+    if not constants.RESOLVED_DEFAULT_MODEL:
+        await resolve_default_model()
+    return constants.RESOLVED_DEFAULT_MODEL or CLI_DEFAULT_MODEL_ALIAS
 
 
 def generate_secure_token(length: int = 32) -> str:
@@ -916,6 +991,9 @@ async def chat_completions(
     try:
         request_id = f"chatcmpl-{os.urandom(8).hex()}"
 
+        if not request_body.model:
+            request_body.model = await _model_for_request()
+
         # Extract Claude-specific parameters from headers
         claude_headers = ParameterValidator.extract_claude_headers(dict(request.headers))
 
@@ -1169,11 +1247,18 @@ async def anthropic_messages(
 async def list_models(
     request: Request, credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)
 ):
-    """List available models, preferring Anthropic's live Models API when configured."""
+    """List the account's models (Anthropic's Models API or the Claude Code CLI)."""
     # Check FastAPI API key if configured
     await verify_api_key(request, credentials)
 
-    return {"object": "list", "data": await get_available_models()}
+    models = await get_available_models()
+    if not models:
+        raise HTTPException(
+            status_code=503,
+            detail="Could not retrieve the model list from Anthropic's Models API or the "
+            "Claude Code CLI. Check the wrapper's logs and Claude Code authentication.",
+        )
+    return {"object": "list", "data": models}
 
 
 @app.post("/v1/compatibility")
@@ -1562,7 +1647,7 @@ async def root():
 
             const quickstartCode = `curl -X POST http://localhost:8000/v1/chat/completions \\\\
   -H "Content-Type: application/json" \\\\
-  -d '{{"model": "claude-sonnet-4-5-20250929", "messages": [{{"role": "user", "content": "Hello!"}}]}}'`;
+  -d '{{"messages": [{{"role": "user", "content": "Hello!"}}]}}'`;
 
             async function highlightQuickstart() {{
                 const theme = isDark() ? darkTheme : lightTheme;
@@ -1578,7 +1663,7 @@ async def root():
             highlightQuickstart();
         </script>
         <script>
-            const quickstartText = 'curl -X POST http://localhost:8000/v1/chat/completions -H "Content-Type: application/json" -d \\'{{"model": "claude-sonnet-4-5-20250929", "messages": [{{"role": "user", "content": "Hello!"}}]}}\\'';
+            const quickstartText = 'curl -X POST http://localhost:8000/v1/chat/completions -H "Content-Type: application/json" -d \\'{{"messages": [{{"role": "user", "content": "Hello!"}}]}}\\'';
 
             function copyQuickstart() {{
                 if (navigator.clipboard && navigator.clipboard.writeText) {{

@@ -5,7 +5,6 @@ Parameter validation and mapping utilities for OpenAI to Claude Code SDK convers
 import logging
 from typing import Dict, Any, List, Optional
 from src.models import ChatCompletionRequest
-from src.constants import CLAUDE_MODELS
 
 logger = logging.getLogger(__name__)
 
@@ -13,18 +12,20 @@ logger = logging.getLogger(__name__)
 class ParameterValidator:
     """Validates and maps OpenAI Chat Completions parameters to Claude Code SDK options."""
 
-    # Use models from constants (single source of truth)
-    SUPPORTED_MODELS = set(CLAUDE_MODELS)
+    # Model ids and CLI aliases from the last model discovery (see
+    # main.get_available_models); empty until a discovery succeeded.
+    known_models: set = set()
 
     # Valid permission modes for Claude Code SDK
     VALID_PERMISSION_MODES = {"default", "acceptEdits", "bypassPermissions", "plan"}
 
     @classmethod
     def validate_model(cls, model: str) -> bool:
-        """Validate that the model is supported by Claude Code SDK."""
-        if model not in cls.SUPPORTED_MODELS:
+        """Warn when the model is not among the discovered models."""
+        if cls.known_models and model not in cls.known_models:
             logger.warning(
-                f"Model '{model}' is not in the known supported models list. It will still be attempted but may fail. Supported models: {sorted(cls.SUPPORTED_MODELS)}"
+                f"Model '{model}' is not among the models available to this account. "
+                f"It will still be attempted but may fail. Available: {sorted(cls.known_models)}"
             )
             # Return True anyway to allow graceful degradation
         return True

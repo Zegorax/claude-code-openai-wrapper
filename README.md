@@ -6,7 +6,7 @@ An OpenAI API-compatible wrapper for Claude Code, allowing you to use Claude Cod
 
 **Current Version:** 2.3.0
 - **Live `/v1/models` discovery:** When `ANTHROPIC_API_KEY` is set, the wrapper fetches Anthropic's live model list (cached) instead of serving the static fallback
-- **Dynamic default Sonnet:** `DEFAULT_MODEL` resolves to the latest Sonnet at startup when `ANTHROPIC_API_KEY` is configured; falls back to `claude-sonnet-4-6` otherwise
+- **Dynamic default Sonnet:** `DEFAULT_MODEL` resolves to the latest Sonnet at startup when `ANTHROPIC_API_KEY` is configured; falls back to `claude-sonnet-5-5` otherwise
 - **Operator overrides:** New `CLAUDE_MODELS_OVERRIDE`, `FAST_MODEL`, and `MODEL_LIST_*` env vars
 - **Updated catalog:** Claude 4.6 family added to the static fallback list
 
@@ -322,6 +322,20 @@ docker run -d -p 8000:8000 \
 A new GHCR package is private; make it public in the package settings to pull it
 without logging in.
 
+`docker-compose.ghcr.yml` runs the prebuilt image with a subscription token:
+
+```bash
+echo 'CLAUDE_CODE_OAUTH_TOKEN=<token from claude setup-token>' > .env && chmod 600 .env
+docker compose -f docker-compose.ghcr.yml up -d
+# OpenAI base URL: http://127.0.0.1:8000/v1
+```
+
+- The port is bound to localhost; set `API_KEY` before exposing it further.
+- The chat rate limit is raised to 60 requests per minute, since an agent makes one
+  request per step.
+- The CLI's settings and state live in the `claude-data` volume, separate from any
+  Claude Code installation on the host.
+
 ### Build
 
 ```bash
@@ -385,10 +399,9 @@ Run: `docker-compose up -d` | Stop: `docker-compose down`
 | `CLAUDE_AUTH_METHOD` | Auth method: `cli`, `api_key`, `bedrock`, `vertex` | auto-detect |
 | `ANTHROPIC_API_KEY` | Direct Anthropic API key. Optional — also unlocks live `/v1/models` discovery and dynamic latest-Sonnet default. Not required when using Bedrock, Vertex, or Claude CLI subscription auth. | - |
 | `API_KEYS` | Comma-separated client API keys | - |
-| `DEFAULT_MODEL` | Override the default model. When unset and `ANTHROPIC_API_KEY` is configured, the wrapper resolves the latest Sonnet at startup; otherwise falls back to `claude-sonnet-4-6`. | auto |
-| `FAST_MODEL` | Speed/cost-optimized model alias. | `claude-haiku-4-5-20251001` |
-| `CLAUDE_MODELS_OVERRIDE` | Comma-separated model IDs to advertise via `/v1/models`. Takes precedence over both live and static lists. | - |
-| `MODEL_LIST_CACHE_TTL_SECONDS` | Cache TTL for live `/v1/models` results. | `3600` |
+| `DEFAULT_MODEL` | Model for requests that name none. When unset: the model the Claude Code CLI recommends (or the newest Sonnet from Anthropic's Models API when `ANTHROPIC_API_KEY` is set); if neither can be discovered, the CLI chooses. | discovered |
+| `CLI_MODEL_DISCOVERY` | Without `ANTHROPIC_API_KEY`, list models and pick the default from the bundled Claude Code CLI. | `true` |
+| `MODEL_LIST_CACHE_TTL_SECONDS` | Cache TTL for the discovered model list. | `3600` |
 | `MODEL_LIST_ERROR_TTL_SECONDS` | Short cache TTL applied when the live fetch fails, so transient outages don't suppress live discovery for the full hour. | `60` |
 | `MODEL_LIST_REQUEST_TIMEOUT_SECONDS` | HTTP timeout for the live model fetch. | `5` |
 
@@ -417,7 +430,7 @@ curl http://localhost:8000/v1/models
 curl -X POST http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "claude-sonnet-4-6",
+    "model": "claude-sonnet-5-5",
     "messages": [
       {"role": "user", "content": "What is 2 + 2?"}
     ]
@@ -428,7 +441,7 @@ curl -X POST http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer your-generated-api-key" \
   -d '{
-    "model": "claude-sonnet-4-6",
+    "model": "claude-sonnet-5-5",
     "messages": [
       {"role": "user", "content": "Write a Python hello world script"}
     ],
@@ -452,7 +465,7 @@ client = OpenAI(
 
 # Basic chat completion
 response = client.chat.completions.create(
-    model="claude-sonnet-4-6",
+    model="claude-sonnet-5-5",
     messages=[
         {"role": "system", "content": "You are a helpful assistant."},
         {"role": "user", "content": "What files are in the current directory?"}
@@ -464,7 +477,7 @@ print(response.choices[0].message.content)
 
 # Enable tools when you need them (e.g., to read files)
 response = client.chat.completions.create(
-    model="claude-sonnet-4-6",
+    model="claude-sonnet-5-5",
     messages=[
         {"role": "user", "content": "What files are in the current directory?"}
     ],
@@ -479,7 +492,7 @@ print(f"Tokens: {response.usage.total_tokens} ({response.usage.prompt_tokens} + 
 
 # Streaming
 stream = client.chat.completions.create(
-    model="claude-sonnet-4-6",
+    model="claude-sonnet-5-5",
     messages=[
         {"role": "user", "content": "Explain quantum computing"}
     ],
@@ -493,19 +506,23 @@ for chunk in stream:
 
 ## Supported Models
 
-The wrapper exposes Claude's full model catalog. When `ANTHROPIC_API_KEY` is set, `/v1/models` returns Anthropic's live list (cached for 1 hour) and the wrapper picks the latest Sonnet as `DEFAULT_MODEL` at startup. When the key is absent — for example, when running with Bedrock, Vertex, or Claude CLI subscription auth — the static list below is served and `claude-sonnet-4-6` is used as the fallback default. Operators who want a curated list regardless of auth can set `CLAUDE_MODELS_OVERRIDE`.
+The wrapper has no built-in model list: models are always discovered from your
+account at runtime.
 
-### Claude 4.6 Family (Latest)
-- **`claude-opus-4-6`** 🎯 Most capable
-- **`claude-sonnet-4-6`** ⭐ Recommended — best coding model
+1. With `ANTHROPIC_API_KEY` set, `/v1/models` returns Anthropic's Models API list and
+   the newest Sonnet becomes the default model.
+2. Otherwise (subscription token, Claude CLI login, Bedrock, Vertex) it asks the
+   bundled Claude Code CLI, which reports the account's models and its recommended
+   model when the SDK connects; no model call is made. The recommended model is
+   listed first and becomes the default. Set `CLI_MODEL_DISCOVERY=false` to skip
+   this.
+3. If neither source answers, `/v1/models` returns HTTP 503, and requests without a
+   `model` pass `default` to the CLI, which then picks its recommended model.
 
-### Claude 4.5 Family (Fall 2025)
-- `claude-opus-4-5-20250929` — deep reasoning and coding
-- `claude-sonnet-4-5-20250929` — agents and coding
-- **`claude-haiku-4-5-20251001`** ⚡ Fast & cheap
-
-### Claude 4.1 Family
-- `claude-opus-4-1-20250805` — upgraded Opus 4
+The list is cached for an hour (`MODEL_LIST_CACHE_TTL_SECONDS`); after a failure it
+is retried after `MODEL_LIST_ERROR_TTL_SECONDS`. Besides the listed ids, the CLI
+accepts its aliases such as `sonnet`, `opus` and `haiku`. `DEFAULT_MODEL` pins the
+model used when a request names none.
 
 **Note:** Claude 3.x models are not supported by the Claude Agent SDK. The model parameter is passed to Claude Code via the SDK's model selection.
 
@@ -530,7 +547,7 @@ client = openai.OpenAI(
 
 # Start a conversation with session continuity
 response1 = client.chat.completions.create(
-    model="claude-sonnet-4-6",
+    model="claude-sonnet-5-5",
     messages=[
         {"role": "user", "content": "Hello! My name is Alice and I'm learning Python."}
     ],
@@ -539,7 +556,7 @@ response1 = client.chat.completions.create(
 
 # Continue the conversation - Claude remembers the context
 response2 = client.chat.completions.create(
-    model="claude-sonnet-4-6",
+    model="claude-sonnet-5-5",
     messages=[
         {"role": "user", "content": "What's my name and what am I learning?"}
     ],
@@ -555,7 +572,7 @@ response2 = client.chat.completions.create(
 curl -X POST http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "claude-sonnet-4-6",
+    "model": "claude-sonnet-5-5",
     "messages": [{"role": "user", "content": "My favourite color is blue."}],
     "session_id": "my-session"
   }'
@@ -564,7 +581,7 @@ curl -X POST http://localhost:8000/v1/chat/completions \
 curl -X POST http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "claude-sonnet-4-6",
+    "model": "claude-sonnet-5-5",
     "messages": [{"role": "user", "content": "What's my favourite color?"}],
     "session_id": "my-session"
   }'
@@ -618,15 +635,14 @@ See `examples/session_continuity.py` for comprehensive Python examples and `exam
 - `DELETE /v1/sessions/{session_id}` - Delete a specific session
 - `GET /v1/sessions/stats` - Get session manager statistics
 
-## Using with QwenPaw / OpenAI function calling
+## OpenAI function calling
 
 `/v1/chat/completions` accepts OpenAI function calling: `tools`, `tool_choice`
 (`"auto"`, `"none"`, `"required"` or `{"type": "function", "function": {"name": ...}}`),
 `parallel_tool_calls`, assistant messages with `tool_calls` (and `content: null`),
 and `role: "tool"` results. The client runs the tools itself; Claude Code's built-in
-tools are not offered at all and every request is a single model turn, so agent runtimes such
-as [QwenPaw](https://github.com/agentscope-ai/QwenPaw) keep their own memory, context
-management and tool approval.
+tools are not offered at all and every request is a single model turn, so agent runtimes
+keep their own memory, context management and tool approval.
 
 ### How it works
 
@@ -661,45 +677,40 @@ CLI: the old disallowed-tools list missed newer built-in tools such as `ToolSear
 which Claude could still call (leaving an empty reply), and their definitions added
 roughly 10-25k input tokens to every request.
 
-### QwenPaw setup
+### Client setup
 
-1. Run the wrapper on the QwenPaw host with Claude Code authentication, for example
-   `claude setup-token`, then `export CLAUDE_CODE_OAUTH_TOKEN=...` and
-   `CLAUDE_AUTH_METHOD=cli`. The token is only read by the bundled Claude Code CLI
-   from its environment; the wrapper never sends it over HTTP. If the host also runs
-   Claude Code interactively, consider `CLAUDE_CONFIG_DIR=<empty dir>` for the
-   wrapper so the CLI doesn't load that user's settings, plugins and memory.
-2. In QwenPaw Console → Settings → Models, add a custom OpenAI-compatible provider
-   with base URL `http://127.0.0.1:8000/v1` and any API key (or the wrapper's
-   `API_KEY` if protection is on).
-3. Add a model id listed by `GET /v1/models`, for example `claude-sonnet-4-6`.
-4. Make it the active model. QwenPaw 2.2.1 has no per-model tool-calling flag to
-   set; it sends its tools to the active model on every step.
-
-Tested end to end with QwenPaw 2.2.1 (`qwenpaw app`, Console chat API): plain
-answers, file reads, multi-step tool chains, a scheduled agent job, and a Tool Guard
-approval prompt (denied) for an `rm -rf` command. QwenPaw's headless `qwenpaw task`
-command builds its agent without workspace tools, so tool use needs the app.
+1. Run the wrapper with Claude Code authentication, for example `claude setup-token`,
+   then `export CLAUDE_CODE_OAUTH_TOKEN=...` and `CLAUDE_AUTH_METHOD=cli`. The token
+   is only read by the bundled Claude Code CLI from its environment; the wrapper
+   never sends it over HTTP. If the host also runs Claude Code interactively,
+   consider `CLAUDE_CONFIG_DIR=<empty dir>` for the wrapper so the CLI doesn't load
+   that user's settings, plugins and memory.
+2. In the client, add an OpenAI-compatible provider with base URL
+   `http://127.0.0.1:8000/v1` and any API key (or the wrapper's `API_KEY` if
+   protection is on).
+3. Use a model id listed by `GET /v1/models`, or leave the model unset to get the
+   default.
 
 ### Latency and usage
 
 Each agent step starts a new Claude Code process and sends the full history, so a
 task with N tool calls costs N+1 complete runs, and input tokens grow with every
 step. The system prompt (with the tool schemas) is rendered identically on every
-call so it is served from Claude's prompt cache. With QwenPaw (about 17k input
-tokens per step), steps after the first read about 96% of their input from cache,
-and each step took 2.5-5 s of wall time, of which roughly 1-2 s is CLI start-up.
+call so it is served from Claude's prompt cache. In tests with an agent sending
+about 17k input tokens per step, steps after the first read about 96% of their input
+from cache, and each step took 2.5-5 s of wall time, of which roughly 1-2 s is CLI
+start-up.
 Each step logs `duration_ms`, `duration_api_ms` and token usage, including cache
 reads, at INFO level.
 
 Use this with your own subscription for your own use only. Don't put a shared or
-public QwenPaw instance (for example a public chat channel) on it.
+public service (for example a public chat channel) on it.
 
 ## Limitations & Roadmap
 
 ### 🚫 **Current Limitations**
 - **Images in messages** are converted to text placeholders
-- **Function calling** is emulated through the prompt (see [Using with QwenPaw / OpenAI function calling](#using-with-qwenpaw--openai-function-calling))
+- **Function calling** is emulated through the prompt (see [OpenAI function calling](#openai-function-calling))
 - **OpenAI parameters** not yet mapped: `temperature`, `top_p`, `max_tokens`, `logit_bias`, `presence_penalty`, `frequency_penalty`
 - **Multiple responses** (`n > 1`) not supported
 

@@ -1,0 +1,43 @@
+# Run the prebuilt image from GHCR, authenticated with a Claude Code
+# subscription token.
+#
+#   1. claude setup-token            # on any machine with Claude Code
+#   2. echo 'CLAUDE_CODE_OAUTH_TOKEN=<token>' > .env && chmod 600 .env
+#   3. docker compose -f docker-compose.ghcr.yml up -d
+#
+# OpenAI base URL for clients: http://127.0.0.1:8000/v1
+# (from another container on the same Compose network: http://claude-wrapper:8000/v1)
+services:
+  claude-wrapper:
+    # Use :pr-<number> to run a pull request build before it is merged.
+    image: ${WRAPPER_IMAGE:-ghcr.io/zegorax/claude-code-openai-wrapper:latest}
+    container_name: claude-wrapper
+    restart: unless-stopped
+    ports:
+      # Bound to localhost only: anyone who can reach this port can use the
+      # subscription. Set API_KEY below before exposing it further.
+      - "127.0.0.1:8000:8000"
+    environment:
+      CLAUDE_AUTH_METHOD: cli
+      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:?set CLAUDE_CODE_OAUTH_TOKEN in .env}
+      # Keep the CLI's settings and state in the volume below, separate from
+      # any Claude Code installation on the host.
+      CLAUDE_CONFIG_DIR: /data/claude
+      # Optional bearer token clients must send as their API key.
+      API_KEY: ${API_KEY:-}
+      # An agent makes one request per step; the default of 10/min is too low.
+      RATE_LIMIT_CHAT_PER_MINUTE: ${RATE_LIMIT_CHAT_PER_MINUTE:-60}
+      MAX_TIMEOUT: ${MAX_TIMEOUT:-600000}
+      # Retry once when a reply has unusable tool-call markup.
+      TOOL_CALL_RETRY: "true"
+    volumes:
+      - claude-data:/data/claude
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
+
+volumes:
+  claude-data:

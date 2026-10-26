@@ -4,11 +4,6 @@ Constants and configuration for Claude Code OpenAI Wrapper.
 Single source of truth for tool names, models, and other configuration values.
 
 Usage Examples:
-    # Check if a model is supported
-    from src.constants import CLAUDE_MODELS
-    if model_name in CLAUDE_MODELS:
-        # proceed with request
-
     # Get default allowed tools
     from src.constants import DEFAULT_ALLOWED_TOOLS
     options = {"allowed_tools": DEFAULT_ALLOWED_TOOLS}
@@ -20,7 +15,7 @@ Usage Examples:
 
 Note:
     - Tool configurations are managed by ToolManager (see tool_manager.py)
-    - Model validation uses graceful degradation (warns but allows unknown models)
+    - Models are discovered at runtime, never listed here
     - Rate limits can be overridden via environment variables
 """
 
@@ -67,44 +62,18 @@ DEFAULT_DISALLOWED_TOOLS = [
 ]
 
 # Claude Models
-# Static fallback models exposed by /v1/models and accepted by validation when
-# the live Anthropic Models API is unavailable or not configured.
-# NOTE: Claude Agent SDK only supports Claude 4+ models, not Claude 3.x.
+# Models are never hardcoded: /v1/models and the default model come from
+# Anthropic's Models API (when ANTHROPIC_API_KEY is set) or from the Claude
+# Code CLI, which reports the models the logged-in account can use.
 #
-# Operators can override the advertised model list without rebuilding the image:
-#   CLAUDE_MODELS_OVERRIDE=claude-sonnet-4-6,claude-opus-4-6
-DEFAULT_CLAUDE_MODELS = [
-    # Claude 4.6 Family (Latest) - RECOMMENDED
-    "claude-opus-4-6",  # Most capable
-    "claude-sonnet-4-6",  # Recommended - best coding model
-    # Claude 4.5 Family (Fall 2025)
-    "claude-opus-4-5-20250929",  # Opus 4.5 - deep reasoning and coding
-    "claude-sonnet-4-5-20250929",  # Sonnet 4.5 - agents and coding
-    "claude-haiku-4-5-20251001",  # Fast and cheap
-    # Claude 4.1
-    "claude-opus-4-1-20250805",  # Upgraded Opus 4
-]
-
-_models_override = os.getenv("CLAUDE_MODELS_OVERRIDE", "").strip()
-CLAUDE_MODELS = (
-    [model.strip() for model in _models_override.split(",") if model.strip()]
-    if _models_override
-    else DEFAULT_CLAUDE_MODELS
-)
-
-# Default model (recommended for most use cases)
-# DEFAULT_MODEL_ENV is the explicit operator override; when unset, the wrapper
-# resolves the latest Sonnet from Anthropic's live Models API at startup and
-# stores it in RESOLVED_DEFAULT_MODEL. DEFAULT_MODEL_FALLBACK is used until/if
-# that resolution succeeds.
+# DEFAULT_MODEL_ENV is an optional operator choice for requests that name no
+# model. When unset, the wrapper resolves a default from those sources and
+# stores it in RESOLVED_DEFAULT_MODEL.
 DEFAULT_MODEL_ENV: Optional[str] = os.getenv("DEFAULT_MODEL")
-DEFAULT_MODEL_FALLBACK = "claude-sonnet-4-6"
-DEFAULT_MODEL = DEFAULT_MODEL_ENV or DEFAULT_MODEL_FALLBACK
 RESOLVED_DEFAULT_MODEL: Optional[str] = None
-
-# Fast model (for speed/cost optimization)
-# Can be overridden via FAST_MODEL environment variable
-FAST_MODEL = os.getenv("FAST_MODEL", "claude-haiku-4-5-20251001")
+# The Claude Code CLI's own alias for its recommended model; used when no
+# default could be resolved, so the CLI picks.
+CLI_DEFAULT_MODEL_ALIAS = "default"
 
 # Anthropic Models API configuration for dynamically refreshing /v1/models
 ANTHROPIC_MODELS_URL = os.getenv("ANTHROPIC_MODELS_URL", "https://api.anthropic.com/v1/models")

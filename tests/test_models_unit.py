@@ -124,10 +124,22 @@ class TestChatCompletionRequest:
         request = ChatCompletionRequest(messages=[Message(role="user", content="Hi")])
         assert len(request.messages) == 1
 
-    def test_default_model(self):
-        """Default model is set from constants."""
+    def test_default_model(self, monkeypatch):
+        """Without a model, the request takes the operator's or the resolved default."""
+        from src import constants
+
+        monkeypatch.setattr(constants, "DEFAULT_MODEL_ENV", None)
+        monkeypatch.setattr(constants, "RESOLVED_DEFAULT_MODEL", None)
         request = ChatCompletionRequest(messages=[Message(role="user", content="Hi")])
-        assert request.model is not None
+        assert request.model is None  # resolved by the endpoint at request time
+
+        monkeypatch.setattr(constants, "RESOLVED_DEFAULT_MODEL", "claude-sonnet-5-5")
+        request = ChatCompletionRequest(messages=[Message(role="user", content="Hi")])
+        assert request.model == "claude-sonnet-5-5"
+
+        monkeypatch.setattr(constants, "DEFAULT_MODEL_ENV", "claude-opus-5-5")
+        request = ChatCompletionRequest(messages=[Message(role="user", content="Hi")])
+        assert request.model == "claude-opus-5-5"
 
     def test_temperature_range_validation(self):
         """Temperature must be between 0 and 2."""

@@ -229,6 +229,40 @@ class TestNonStreaming:
         assert choice["finish_reason"] == "tool_calls"
 
 
+class TestDefaultModel:
+    def test_request_without_model_uses_resolved_default(self, client, fake_sdk):
+        from src import constants
+
+        sdk = fake_sdk("Hi.")
+        body = tool_request()
+        del body["model"]
+        with (
+            patch.object(constants, "DEFAULT_MODEL_ENV", None),
+            patch.object(constants, "RESOLVED_DEFAULT_MODEL", "claude-sonnet-5-5"),
+        ):
+            data = client.post("/v1/chat/completions", json=body).json()
+        assert sdk.calls[0]["model"] == "claude-sonnet-5-5"
+        assert data["model"] == "claude-sonnet-5-5"
+
+    def test_request_without_model_lets_cli_choose(self, client, fake_sdk):
+        from src import constants
+
+        async def nothing_resolved():
+            return None
+
+        sdk = fake_sdk("Hi.")
+        body = tool_request()
+        del body["model"]
+        with (
+            patch.object(constants, "DEFAULT_MODEL_ENV", None),
+            patch.object(constants, "RESOLVED_DEFAULT_MODEL", None),
+            patch.object(main, "resolve_default_model", nothing_resolved),
+        ):
+            data = client.post("/v1/chat/completions", json=body).json()
+        assert sdk.calls[0]["model"] == "default"
+        assert data["model"] == "default"
+
+
 class TestStreaming:
     def test_chunk_sequence(self, client, fake_sdk):
         fake_sdk(CALL_REPLY)
@@ -289,7 +323,7 @@ class TestStreaming:
 
 
 class TestOpenAIClientContract:
-    """A full tool loop through the openai SDK, as QwenPaw would drive it."""
+    """A full tool loop through the openai SDK, as an agent client would drive it."""
 
     @pytest.fixture
     def openai_client(self, client):

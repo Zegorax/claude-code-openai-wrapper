@@ -10,7 +10,6 @@ from hypothesis import given, strategies as st, settings, assume
 
 from src.message_adapter import MessageAdapter
 from src.parameter_validator import ParameterValidator
-from src.constants import CLAUDE_MODELS
 
 
 class TestMessageAdapterProperties:
@@ -38,7 +37,7 @@ class TestMessageAdapterProperties:
 class TestParameterValidatorProperties:
     """Property-based tests for ParameterValidator."""
 
-    @given(model=st.sampled_from(CLAUDE_MODELS))
+    @given(model=st.sampled_from(["claude-sonnet-5-5", "claude-opus-5-5", "sonnet", "default"]))
     @settings(max_examples=20)
     def test_valid_model_names_accepted(self, model: str):
         """Valid Claude model names should be accepted."""
