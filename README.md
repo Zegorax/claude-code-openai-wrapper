@@ -322,33 +322,19 @@ docker run -d -p 8000:8000 \
 A new GHCR package is private; make it public in the package settings to pull it
 without logging in.
 
-`docker-compose.ghcr.yml` runs the prebuilt image together with
-[QwenPaw](https://github.com/agentscope-ai/QwenPaw) (`agentscope/qwenpaw:v2.2.1`),
-already wired together:
+`docker-compose.ghcr.yml` runs the prebuilt image with a subscription token:
 
 ```bash
 echo 'CLAUDE_CODE_OAUTH_TOKEN=<token from claude setup-token>' > .env && chmod 600 .env
 docker compose -f docker-compose.ghcr.yml up -d
-# QwenPaw Console: http://127.0.0.1:8088   Wrapper API: http://127.0.0.1:8000/v1
+# OpenAI base URL: http://127.0.0.1:8000/v1
 ```
 
-- A one-shot `qwenpaw-setup` container (`deploy/qwenpaw-setup.py`) registers the
-  wrapper as QwenPaw's provider (`http://claude-wrapper:8000/v1`), adds the models
-  the wrapper lists for your account (or those in `CLAUDE_MODELS`) and makes the
-  first one, the recommended model, active if no model is active yet. It runs on every
-  start and leaves a model chosen later in the Console alone. If the wrapper can't
-  list models yet, the provider is registered without models; restart the service
-  or sync the provider's models in the Console later.
-- Both ports are bound to localhost. Set `API_KEY` to protect the wrapper (the setup
-  passes it to QwenPaw) and `QWENPAW_AUTH_ENABLED=true` with
-  `QWENPAW_AUTH_USERNAME`/`QWENPAW_AUTH_PASSWORD` before exposing QwenPaw.
-- The chat rate limit is raised to 60 requests per minute; an agent makes one
+- The port is bound to localhost; set `API_KEY` before exposing it further.
+- The chat rate limit is raised to 60 requests per minute, since an agent makes one
   request per step.
-- State lives in named volumes: the CLI's in `claude-data`, QwenPaw's in
-  `qwenpaw-data`, `qwenpaw-secrets` and `qwenpaw-backups`.
-- QwenPaw's non-interactive init sets up the agent in Chinese; change the language
-  in the Console settings.
-- To run only the wrapper: `docker compose -f docker-compose.ghcr.yml up -d claude-wrapper`.
+- The CLI's settings and state live in the `claude-data` volume, separate from any
+  Claude Code installation on the host.
 
 ### Build
 
@@ -649,15 +635,14 @@ See `examples/session_continuity.py` for comprehensive Python examples and `exam
 - `DELETE /v1/sessions/{session_id}` - Delete a specific session
 - `GET /v1/sessions/stats` - Get session manager statistics
 
-## Using with QwenPaw / OpenAI function calling
+## OpenAI function calling
 
 `/v1/chat/completions` accepts OpenAI function calling: `tools`, `tool_choice`
 (`"auto"`, `"none"`, `"required"` or `{"type": "function", "function": {"name": ...}}`),
 `parallel_tool_calls`, assistant messages with `tool_calls` (and `content: null`),
 and `role: "tool"` results. The client runs the tools itself; Claude Code's built-in
-tools are not offered at all and every request is a single model turn, so agent runtimes such
-as [QwenPaw](https://github.com/agentscope-ai/QwenPaw) keep their own memory, context
-management and tool approval.
+tools are not offered at all and every request is a single model turn, so agent runtimes
+keep their own memory, context management and tool approval.
 
 ### How it works
 
@@ -692,45 +677,40 @@ CLI: the old disallowed-tools list missed newer built-in tools such as `ToolSear
 which Claude could still call (leaving an empty reply), and their definitions added
 roughly 10-25k input tokens to every request.
 
-### QwenPaw setup
+### Client setup
 
-1. Run the wrapper on the QwenPaw host with Claude Code authentication, for example
-   `claude setup-token`, then `export CLAUDE_CODE_OAUTH_TOKEN=...` and
-   `CLAUDE_AUTH_METHOD=cli`. The token is only read by the bundled Claude Code CLI
-   from its environment; the wrapper never sends it over HTTP. If the host also runs
-   Claude Code interactively, consider `CLAUDE_CONFIG_DIR=<empty dir>` for the
-   wrapper so the CLI doesn't load that user's settings, plugins and memory.
-2. In QwenPaw Console → Settings → Models, add a custom OpenAI-compatible provider
-   with base URL `http://127.0.0.1:8000/v1` and any API key (or the wrapper's
-   `API_KEY` if protection is on).
-3. Add a model id listed by `GET /v1/models`, for example `claude-sonnet-5-5`.
-4. Make it the active model. QwenPaw 2.2.1 has no per-model tool-calling flag to
-   set; it sends its tools to the active model on every step.
-
-Tested end to end with QwenPaw 2.2.1 (`qwenpaw app`, Console chat API): plain
-answers, file reads, multi-step tool chains, a scheduled agent job, and a Tool Guard
-approval prompt (denied) for an `rm -rf` command. QwenPaw's headless `qwenpaw task`
-command builds its agent without workspace tools, so tool use needs the app.
+1. Run the wrapper with Claude Code authentication, for example `claude setup-token`,
+   then `export CLAUDE_CODE_OAUTH_TOKEN=...` and `CLAUDE_AUTH_METHOD=cli`. The token
+   is only read by the bundled Claude Code CLI from its environment; the wrapper
+   never sends it over HTTP. If the host also runs Claude Code interactively,
+   consider `CLAUDE_CONFIG_DIR=<empty dir>` for the wrapper so the CLI doesn't load
+   that user's settings, plugins and memory.
+2. In the client, add an OpenAI-compatible provider with base URL
+   `http://127.0.0.1:8000/v1` and any API key (or the wrapper's `API_KEY` if
+   protection is on).
+3. Use a model id listed by `GET /v1/models`, or leave the model unset to get the
+   default.
 
 ### Latency and usage
 
 Each agent step starts a new Claude Code process and sends the full history, so a
 task with N tool calls costs N+1 complete runs, and input tokens grow with every
 step. The system prompt (with the tool schemas) is rendered identically on every
-call so it is served from Claude's prompt cache. With QwenPaw (about 17k input
-tokens per step), steps after the first read about 96% of their input from cache,
-and each step took 2.5-5 s of wall time, of which roughly 1-2 s is CLI start-up.
+call so it is served from Claude's prompt cache. In tests with an agent sending
+about 17k input tokens per step, steps after the first read about 96% of their input
+from cache, and each step took 2.5-5 s of wall time, of which roughly 1-2 s is CLI
+start-up.
 Each step logs `duration_ms`, `duration_api_ms` and token usage, including cache
 reads, at INFO level.
 
 Use this with your own subscription for your own use only. Don't put a shared or
-public QwenPaw instance (for example a public chat channel) on it.
+public service (for example a public chat channel) on it.
 
 ## Limitations & Roadmap
 
 ### 🚫 **Current Limitations**
 - **Images in messages** are converted to text placeholders
-- **Function calling** is emulated through the prompt (see [Using with QwenPaw / OpenAI function calling](#using-with-qwenpaw--openai-function-calling))
+- **Function calling** is emulated through the prompt (see [OpenAI function calling](#openai-function-calling))
 - **OpenAI parameters** not yet mapped: `temperature`, `top_p`, `max_tokens`, `logit_bias`, `presence_penalty`, `frequency_penalty`
 - **Multiple responses** (`n > 1`) not supported
 

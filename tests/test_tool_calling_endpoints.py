@@ -323,7 +323,7 @@ class TestStreaming:
 
 
 class TestOpenAIClientContract:
-    """A full tool loop through the openai SDK, as QwenPaw would drive it."""
+    """A full tool loop through the openai SDK, as an agent client would drive it."""
 
     @pytest.fixture
     def openai_client(self, client):
